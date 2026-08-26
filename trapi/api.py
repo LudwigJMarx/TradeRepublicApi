@@ -1072,11 +1072,13 @@ class TRApi:
     def _order_expiry(expiry, expiry_date=None):
         """The expiry of an order, which carries a date for "gtd".
 
-        The order objects show the field as {"type": ..., "value": ...}, and
-        without the value a "gtd" order has no date to expire on.
+        The order objects report this field as {"type": ..., "value": ...},
+        but a request must not copy that: sending "value": null makes the
+        server refuse the whole subscription. The value belongs there only
+        for "gtd", which without it has no date to expire on.
         """
         if expiry != "gtd":
-            return {"type": expiry, "value": None}
+            return {"type": expiry}
         if not expiry_date:
             raise TRapiException(
                 "expiry 'gtd' needs an expiry_date, e.g. '2026-12-31'"
