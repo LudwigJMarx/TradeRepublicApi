@@ -11,7 +11,7 @@ import json
 import unittest
 from unittest import mock
 
-from trapi.api import TRApi, TRapiException
+from trapi.api import TRApi, TrBlockingApi, TRapiException
 
 # A single loop for the whole module: asyncio primitives created in TRApi
 # bind to the loop that is current at construction time.
@@ -185,6 +185,36 @@ class FrameParsingTest(unittest.TestCase):
         # character by character.
         obj = self.receive("1 D =16", latest='{"price":13.873}')
         self.assertEqual(obj["price"], 13.873)
+
+
+class BlockingApiLoopTest(unittest.TestCase):
+    """TrBlockingApi owns its loop instead of calling asyncio.get_event_loop(),
+    which is deprecated since 3.10 and stops creating a loop in 3.14."""
+
+    def setUp(self):
+        self.addCleanup(asyncio.set_event_loop, LOOP)
+
+    def test_owns_a_usable_loop(self):
+        tr = TrBlockingApi("+490000000000", "0000")
+        self.addCleanup(tr.close)
+        self.assertFalse(tr._loop.is_closed())
+        self.assertIsNot(tr._loop, LOOP)
+
+    def test_close_closes_the_loop(self):
+        tr = TrBlockingApi("+490000000000", "0000")
+        tr.close()
+        self.assertTrue(tr._loop.is_closed())
+
+    def test_can_be_used_as_a_context_manager(self):
+        with TrBlockingApi("+490000000000", "0000") as tr:
+            loop = tr._loop
+            self.assertFalse(loop.is_closed())
+        self.assertTrue(loop.is_closed())
+
+    def test_closing_twice_is_harmless(self):
+        tr = TrBlockingApi("+490000000000", "0000")
+        tr.close()
+        tr.close()
 
 
 if __name__ == "__main__":
