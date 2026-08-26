@@ -428,6 +428,22 @@ class CreateOrderPayloadTest(unittest.TestCase):
             self.payload_of(limit="cheap")
         self.assertIn("limit", str(ctx.exception))
 
+    def test_expiry_carries_a_value_field(self):
+        # The order objects show it as {"type": ..., "value": ...}.
+        expiry = self.payload_of(expiry="gfd")["parameters"]["expiry"]
+        self.assertEqual(expiry, {"type": "gfd", "value": None})
+
+    def test_a_dated_expiry_needs_its_date(self):
+        # Without it a "gtd" order has no date to expire on, and the library
+        # could not express one at all before.
+        with self.assertRaises(TRapiException) as ctx:
+            self.payload_of(expiry="gtd")
+        self.assertIn("expiry_date", str(ctx.exception))
+
+        expiry = self.payload_of(expiry="gtd",
+                                 expiry_date="2026-12-31")["parameters"]["expiry"]
+        self.assertEqual(expiry, {"type": "gtd", "value": "2026-12-31"})
+
     def test_the_process_id_has_to_be_a_uuid(self):
         with self.assertRaises(TRapiException) as ctx:
             self.payload_of(order_id="some-id")

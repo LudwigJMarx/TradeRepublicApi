@@ -1069,6 +1069,21 @@ class TRApi:
             )
 
     @staticmethod
+    def _order_expiry(expiry, expiry_date=None):
+        """The expiry of an order, which carries a date for "gtd".
+
+        The order objects show the field as {"type": ..., "value": ...}, and
+        without the value a "gtd" order has no date to expire on.
+        """
+        if expiry != "gtd":
+            return {"type": expiry, "value": None}
+        if not expiry_date:
+            raise TRapiException(
+                "expiry 'gtd' needs an expiry_date, e.g. '2026-12-31'"
+            )
+        return {"type": "gtd", "value": str(expiry_date)}
+
+    @staticmethod
     def _order_process_id(order_id):
         """The client process id has to be a uuid.
 
@@ -1095,6 +1110,7 @@ class TRApi:
             limit,
             expiry,
             exchange="LSX",
+            expiry_date=None,
             callback=print,
     ):
         """simpleCreateOrder request
@@ -1105,12 +1121,18 @@ class TRApi:
         reaches the order engine and is processed. Dropping warningsShown or
         acceptedWarnings makes the validation fail, so both are required.
 
+        Not every expiry works everywhere. "gtc" is refused for a limit
+        order at LSX with "limit orders do not support gtc expiry at lsx",
+        and "gtd" needs a date in expiry_date.
+
         An accepted order answers with the id it got::
 
             {"status": "succeeded", "orderId": "<uuid>"}
 
-        A rejection comes back the same way rather than as an error state, so
-        the answer has to be looked at either way::
+        A rejection comes back the same way rather than as an error state,
+        so the answer has to be looked at either way. It does not always
+        carry an error object - the refusal above is only status and
+        message - so read "message" and treat "error" as optional::
 
             {"status": "failed",
              "message": "Insufficient funds for this operation.",
@@ -1170,7 +1192,7 @@ class TRApi:
             "parameters": {
                 "instrumentId": isin,
                 "exchangeId": exchange,
-                "expiry": {"type": expiry},
+                "expiry": self._order_expiry(expiry, expiry_date),
                 "limit": self._order_number(limit, "limit"),
                 "mode": "limit",
                 "size": self._order_number(size, "size"),
