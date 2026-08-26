@@ -880,7 +880,31 @@ class TRApi:
     # todo newsSubscriptions
 
     async def orders(self, terminated=False, callback=print):
-        """orders request"""
+        """orders request
+
+        Login required!
+
+        Answers with {"orders": [...], "unsupportedOrderCount": n}. An order
+        looks like this, recorded from a real one in August 2026::
+
+            {"id": "<uuid>", "createdTime": 1787755157482,
+             "currencyId": "EUR", "targetCurrency": "EUR",
+             "exchangeId": "TIB", "instrumentId": "<isin>",
+             "instrumentName": "Apple", "instrumentType": "stock",
+             "instrumentCategory": "brokerage", "productCategory": None,
+             "imageId": "logos/<isin>/v2",
+             "type": "buy", "mode": "limit", "limit": 180.0,
+             "size": 0.016666, "status": "active",
+             "expiry": {"type": "gfd", "value": None},
+             "executions": [], "quoteRequest": False,
+             "stop": None, "stopOffset": None, "stopOffsetType": None}
+
+        Note that createdTime is milliseconds since the epoch here, while the
+        timeline switched to ISO strings - the two do not agree.
+
+        :param terminated: True lists the orders that are done instead
+        :param callback: callback function
+        """
         return await self.sub(
             "orders",
             callback=callback,
@@ -1081,8 +1105,12 @@ class TRApi:
         reaches the order engine and is processed. Dropping warningsShown or
         acceptedWarnings makes the validation fail, so both are required.
 
-        A rejection comes back as a normal answer rather than as an error
-        state, so it has to be looked at::
+        An accepted order answers with the id it got::
+
+            {"status": "succeeded", "orderId": "<uuid>"}
+
+        A rejection comes back the same way rather than as an error state, so
+        the answer has to be looked at either way::
 
             {"status": "failed",
              "message": "Insufficient funds for this operation.",
@@ -1092,11 +1120,12 @@ class TRApi:
                                    "isin": "...", "portfolioId": None,
                                    "secAccNo": "...", "userId": "..."}}}
 
-        Note that details.exchangeId is not what was sent: "LSX" comes back
-        as "LSXCS".
+        Note that the exchange is not necessarily the one that was asked
+        for. A request for "LSX" came back as "LSXCS" on the rejection and
+        ended up as "TIB" on the order that went through, so treat the
+        exchange as a wish rather than an instruction.
 
-        The answer to an accepted order has not been seen yet - checking that
-        means placing one that actually goes through.
+        Fractional sizes work: an order over 0.016666 shares was accepted.
 
         :param order_id: a fresh uuid identifying this attempt
         :param isin: the instrument's isin
