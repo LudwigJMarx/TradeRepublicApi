@@ -1,17 +1,16 @@
-## Addendum to Export _Trade Republic_ Timeline as Excel(csv) 
+## Exporting the timeline as CSV
 
-This section only explains a specific use-case, which has been tested in the examples folder. 
+Copy `examples/environment_template.py` to `examples/environment.py` and put
+your account in it, then:
 
-**The rest of the readme is intentionally not modified.**
+```bash
+python3 ./examples/timelineExporterWithDocsAndDetails.py
+python3 ./examples/timelineCsvConverter.py
+```
 
-### Steps to use
-
-Important note: This use case is tested on Linux, python 3.8 and 
-with German Language only.
-
- - Update the ```./examples/envConsts.py``` file with appropriate path(s).
- - copy ```environment_template.py``` to ```environment.py``` and change it to match your TR account.
- - See the ```StartMe.sh``` linux command-line script for how it is used further.
+The first logs in, downloads the timeline with its details and saves the
+attached documents; the second turns that into `myTransactions.csv`.
+`startMe.sh` runs both. See `examples/README.md` for the details.
 
 ---
 
