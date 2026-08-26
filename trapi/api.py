@@ -9,6 +9,7 @@ import websockets
 from deprecated import deprecated
 
 import os
+import uuid
 
 import json
 
@@ -1028,6 +1029,39 @@ class TRApi:
 
     # The settings topic was removed by Trade Republic.
 
+    @staticmethod
+    def _order_number(value, field):
+        """Numbers have to go out as numbers.
+
+        A size or a limit sent as a string makes the server refuse the whole
+        subscription with a JSON_PARSE_ERROR that quotes the payload back and
+        says nothing about which field is wrong.
+        """
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            raise TRapiException(
+                f"{field} has to be a number, got {value!r}"
+            )
+
+    @staticmethod
+    def _order_process_id(order_id):
+        """The client process id has to be a uuid.
+
+        Anything else is refused with the same unhelpful JSON_PARSE_ERROR.
+        Passing None asks for a fresh one.
+        """
+        if order_id is None:
+            return str(uuid.uuid4())
+        try:
+            uuid.UUID(str(order_id))
+        except (TypeError, ValueError):
+            raise TRapiException(
+                f"order_id has to be a uuid, got {order_id!r}. "
+                f"Pass None to have one generated."
+            )
+        return str(order_id)
+
     async def simple_create_order(
             self,
             order_id,
@@ -1085,6 +1119,8 @@ class TRApi:
         if exchange not in self.exchange_list:
             raise TRapiException(f"exchange must be either one of {self.exchange_list}")
 
+        order_id = self._order_process_id(order_id)
+
         payload = {
             "type": "simpleCreateOrder",
             "clientProcessId": order_id,
@@ -1094,9 +1130,9 @@ class TRApi:
                 "instrumentId": isin,
                 "exchangeId": exchange,
                 "expiry": {"type": expiry},
-                "limit": limit,
+                "limit": self._order_number(limit, "limit"),
                 "mode": "limit",
-                "size": size,
+                "size": self._order_number(size, "size"),
                 "type": order_type,
             },
         }
