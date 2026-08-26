@@ -973,7 +973,13 @@ class TRApi:
 
         Login required!
 
-        How much of an instrument can be traded at the moment.
+        Answers with a "size" as a string, e.g. {"size": "0.0"}.
+
+        It appears to report how much of the instrument the customer could
+        sell rather than what the exchange would take: an instrument that is
+        not held answers 0.0 while the exchange is open and quoting it. That
+        reading is not confirmed - it would need an account holding the
+        instrument to tell the two apart.
 
         :param isin: the instrument's isin
         :param exchange: the exchange the instrument is traded at
