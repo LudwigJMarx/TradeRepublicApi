@@ -27,6 +27,14 @@ Trade Republic only allows one device to be registered at the same time. So if y
 
 Also running it the first time will likely error but then running it for the second time will work. Have to debug this but not much time.
 
+## Installation
+
+```
+pip install .
+```
+
+The scripts in `examples/` additionally need `pip install .[examples]`.
+
 ## API compatibility
 
 Trade Republic changes its backend without notice. The state below was verified
