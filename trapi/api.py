@@ -1094,7 +1094,44 @@ class TRApi:
 class TrBlockingApi(TRApi):
     def __init__(self, number, pin, timeout=20.0, locale="en", connect_version=None):
         self.timeout = timeout
+        # A dedicated loop instead of asyncio.get_event_loop(): the latter is
+        # deprecated since Python 3.10 and stops creating a loop implicitly in
+        # 3.14. It is installed as the current loop so that the primitives
+        # created in TRApi.__init__ bind to it on older Pythons.
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
         super().__init__(number, pin, locale, connect_version=connect_version)
+
+    def close(self):
+        """Closes the websocket and the event loop this instance owns."""
+        if self._loop.is_closed():
+            return
+
+        if self.ws is not None:
+            try:
+                self._loop.run_until_complete(self.ws.close())
+            except Exception:
+                pass
+            self.ws = None
+
+        # Otherwise the keepalive task of the websocket library survives the
+        # loop and Python complains that a pending task was destroyed.
+        pending = [t for t in asyncio.all_tasks(self._loop) if not t.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            self._loop.run_until_complete(
+                asyncio.gather(*pending, return_exceptions=True)
+            )
+
+        self._loop.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+        return False
 
     async def get_one(self, f):
         await f
@@ -1111,117 +1148,117 @@ class TrBlockingApi(TRApi):
     # -----------------------------------------------------------
 
     def aggregate_history_light(self, isin, range="max", resolution=None, exchange="LSX"):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().aggregate_history_light(isin, range=range, resolution=resolution, exchange=exchange))
         )
 
     def available_cash(self):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().available_cash())
         )
 
     def available_cash_for_payout(self):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().available_cash_for_payout())
         )
 
     def cash(self):
-        return asyncio.get_event_loop().run_until_complete(self.get_one(super().cash()))
+        return self._loop.run_until_complete(self.get_one(super().cash()))
 
     def compact_portfolio_by_type(self):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().compact_portfolio_by_type())
         )
 
     def crypto_details(self, id):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().crypto_details(id))
         )
 
     def etf_composition(self, id):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().etf_composition(id))
         )
 
     def etf_details(self, id):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().etf_details(id))
         )
 
     def instrument(self, id):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().instrument(id))
         )
 
     def performance(self, isin, exchange="LSX"):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().performance(isin, exchange=exchange))
         )
 
     def neon_search(self, query="", page=1, page_size=20, instrument_type="stock", jurisdiction="DE", ):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(
                 super().neon_search(query=query, page=page, page_size=page_size, instrument_type=instrument_type,
                                     jurisdiction=jurisdiction))
         )
 
     def neon_news(self, isin):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().neon_news(isin))
         )
 
     def orders(self):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().orders())
         )
 
     def portfolio(self):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().portfolio())
         )
 
     def portfolio_aggregate_history(self, range="max"):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().portfolio_aggregate_history(range=range))
         )
 
     def stock_detail_dividends(self, isin):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().stock_detail_dividends(isin))
         )
 
     def stock_detail_kpis(self, isin):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().stock_detail_kpis(isin))
         )
 
     def stock_details(self, isin):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().stock_details(isin))
         )
 
     def ticker(self, isin, exchange="LSX"):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().ticker(isin, exchange))
         )
 
     def timeline(self, after=None):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().timeline(after=after))
         )
 
     def timeline_transactions(self, after=None):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().timeline_transactions(after=after))
         )
 
     def timeline_activity_log(self, after=None):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().timeline_activity_log(after=after))
         )
 
     def timeline_detail(self, id):
-        return asyncio.get_event_loop().run_until_complete(
+        return self._loop.run_until_complete(
             self.get_one(super().timeline_detail(id=id))
         )
 
