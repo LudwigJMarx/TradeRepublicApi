@@ -401,6 +401,45 @@ class KeepaliveWiringTest(unittest.TestCase):
         self.assertIsNone(tr._keepalive_task)
 
 
+class StaleSubscriptionTest(unittest.TestCase):
+    """A subscription that was answered keeps pushing updates until it is
+    ended, and those used to land in the middle of the next request."""
+
+    def receive(self, frames, latest=None):
+        tr = api()
+        tr.dict = {"ticker": "3", "orders": "4"}
+        if latest:
+            tr.latest_response.update(latest)
+        ws = FakeWebsocket(frames=frames)
+        with connected(ws):
+            run(tr.sub("orders", print, key="orders"))
+            return tr, ws, run(tr.start(receive_one=True))
+
+    def test_an_update_without_its_initial_response_is_skipped(self):
+        # This is the crash: a price update for an earlier subscription
+        # arrived while an order was being placed, and decode_updates had
+        # nothing to apply it to.
+        tr, ws, obj = self.receive(['3 D =9 -6 +99.999 =1',
+                                    '4 A {"orders": []}'])
+        self.assertEqual(obj["orders"], [])
+
+    def test_the_stale_subscription_is_ended(self):
+        tr, ws, _ = self.receive(['3 D =9 -6 +99.999 =1',
+                                  '4 A {"orders": []}'])
+        self.assertIn("unsub 3", ws.sent)
+
+    def test_a_delivered_subscription_is_ended_too(self):
+        # Otherwise it becomes the stale one that breaks the next request.
+        tr, ws, _ = self.receive(['4 A {"orders": []}'])
+        self.assertIn("unsub 4", ws.sent)
+        self.assertNotIn("4", tr.latest_response)
+
+    def test_updates_still_apply_while_the_baseline_is_there(self):
+        tr, ws, obj = self.receive(['4 D =9 -6 +99.999 =1'],
+                                   latest={"4": '{"price":13.873}'})
+        self.assertEqual(obj["price"], 99.999)
+
+
 class BlockingSessionRefreshTest(unittest.TestCase):
     def setUp(self):
         self.addCleanup(asyncio.set_event_loop, LOOP)

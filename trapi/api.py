@@ -436,6 +436,17 @@ class TRApi:
             method="POST", url=f"{self.url}{path}", data=payload_string, headers=headers
         )
 
+    async def unsub(self, id):
+        """Ends a subscription.
+
+        Without this the server keeps pushing updates for everything that was
+        ever subscribed on the connection, which is how a stale ticker update
+        used to arrive in the middle of an unrelated request.
+        """
+        if self.ws is None:
+            return
+        await self.ws.send(f"unsub {id}")
+
     async def connect_websocket(self):
         """Opens the websocket, authenticated through the session cookies."""
         url = "wss://api.traderepublic.com"
@@ -1351,6 +1362,12 @@ class TRApi:
             data = parts[2] if len(parts) > 2 else ""
 
             if state == "D":
+                if id not in self.latest_response:
+                    # An update for a subscription whose initial response is
+                    # not around any more. It cannot be applied to anything,
+                    # and it is not what the caller is waiting for either.
+                    await self.unsub(id)
+                    continue
                 data = self.decode_updates(id, data.split())
             elif state == "A":
                 pass
@@ -1361,9 +1378,9 @@ class TRApi:
                 # print(sErr)
                 if receive_one:  # cleanup
                     self.started = False
-                    self.callbacks = {}
-                    self.latest_response = {}
-                    # return None
+                    await self.unsub(id)
+                    self.callbacks.pop(id, None)
+                    self.latest_response.pop(id, None)
                 raise TRapiExcServerErrorState(
                     f"Error during server access\n\tServer-side Object probably expired...\n\t{sErr}")
                 # continue
@@ -1391,9 +1408,13 @@ class TRApi:
 
             if receive_one:
                 self.started = False
-                self.callbacks = {}
-
-                self.latest_response = {}
+                # Unsubscribe rather than only forgetting the state: the
+                # server would otherwise go on sending updates for this
+                # subscription, and the next request would find them in its
+                # way.
+                await self.unsub(id)
+                self.callbacks.pop(id, None)
+                self.latest_response.pop(id, None)
                 return obj
             self.callbacks[id](obj)
 
