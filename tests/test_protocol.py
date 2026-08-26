@@ -211,6 +211,14 @@ class WebLoginTest(unittest.TestCase):
         self.assertEqual(state["status"], "CONFIRMED")
         self.assertEqual(len(self.tr.session.get_calls), 3)
 
+    def test_asks_at_least_once_even_with_no_time_left(self):
+        # The loop used to check the clock first, so an approval that was
+        # already there could be missed entirely.
+        self.tr.session = FakeSession(gets=[FakeResponse(200, {"status": "CONFIRMED"})])
+        state = self.tr.await_login_confirmation("pid", timeout=0, interval=0)
+        self.assertEqual(state["status"], "CONFIRMED")
+        self.assertEqual(len(self.tr.session.get_calls), 1)
+
     def test_gives_up_when_the_approval_does_not_come(self):
         self.tr.session = FakeSession()
         self.tr.session.gets = [FakeResponse(200, {"status": "PENDING"})] * 50
