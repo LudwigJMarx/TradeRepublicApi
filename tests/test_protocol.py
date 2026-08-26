@@ -7,11 +7,19 @@ websocket connection. Run them with::
 """
 
 import asyncio
+import base64
 import json
 import unittest
 from unittest import mock
 
-from trapi.api import TRApi, TrBlockingApi, TRapiException
+import requests
+
+from trapi.api import (
+    TRApi,
+    TrBlockingApi,
+    TRapiException,
+    TRapiExcLoginPending,
+)
 
 # A single loop for the whole module: asyncio primitives created in TRApi
 # bind to the loop that is current at construction time.
@@ -106,12 +114,169 @@ class SubscriptionPayloadTest(unittest.TestCase):
                        payload={"type": "stockDetails", "id": "US0378331005"}))
         self.assertNotIn("token", sent_payload(ws))
 
-    def test_token_is_sent_once_logged_in(self):
+    def test_subscriptions_never_carry_a_token(self):
+        # The web login authenticates the connection through its cookies.
         tr, ws = api(), FakeWebsocket()
-        tr.sessionToken = "session-token"
+        tr.sessionToken = "legacy-token"
         with connected(ws):
             run(tr.sub("cash", print))
-        self.assertEqual(sent_payload(ws)["token"], "session-token")
+        self.assertNotIn("token", sent_payload(ws))
+
+
+class FakeResponse:
+    def __init__(self, status_code=200, payload=None, text=""):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text or json.dumps(payload or {})
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("no json")
+        return self._payload
+
+
+class FakeSession:
+    """Stands in for requests.Session, records calls and holds cookies."""
+
+    def __init__(self, posts=None, gets=None):
+        self.cookies = requests.cookies.RequestsCookieJar()
+        self.posts = list(posts or [])
+        self.gets = list(gets or [])
+        self.post_calls = []
+        self.get_calls = []
+
+    def post(self, url, **kwargs):
+        self.post_calls.append((url, kwargs))
+        return self.posts.pop(0) if self.posts else FakeResponse(200, {})
+
+    def get(self, url, **kwargs):
+        self.get_calls.append((url, kwargs))
+        return self.gets.pop(0) if self.gets else FakeResponse(200, {})
+
+
+class WebHeadersTest(unittest.TestCase):
+    def test_device_info_header_is_base64_json(self):
+        tr = api()
+        headers = tr.web_headers()
+        self.assertEqual(headers["X-Tr-Platform"], "web-pro")
+        self.assertTrue(headers["X-TR-App-Version"])
+
+        info = json.loads(base64.b64decode(headers["X-TR-Device-Info"]))
+        self.assertIn("stableDeviceId", info)
+        self.assertIn("browser", info)
+
+    def test_device_id_is_stable_for_the_same_number(self):
+        # A device id that changes on every call would make Trade Republic
+        # treat every login as a new device.
+        first = api().device_info()["stableDeviceId"]
+        second = api().device_info()["stableDeviceId"]
+        self.assertEqual(first, second)
+        other = TRApi("+490000000001", "0000").device_info()["stableDeviceId"]
+        self.assertNotEqual(first, other)
+
+
+class WebLoginTest(unittest.TestCase):
+    def setUp(self):
+        self.tr = api()
+
+    def test_start_login_posts_to_the_v2_endpoint(self):
+        self.tr.session = FakeSession(posts=[FakeResponse(200, {"processId": "abc"})])
+        data = self.tr.start_login()
+
+        url, kwargs = self.tr.session.post_calls[0]
+        self.assertTrue(url.endswith("/api/v2/auth/web/login"))
+        self.assertEqual(kwargs["json"]["phoneNumber"], self.tr.number)
+        self.assertIn("X-TR-Device-Info", kwargs["headers"])
+        self.assertEqual(data["processId"], "abc")
+
+    def test_start_login_reports_the_server_answer(self):
+        self.tr.session = FakeSession(
+            posts=[FakeResponse(426, None, '{"errors":[{"errorCode":"X"}]}')])
+        with self.assertRaises(TRapiException) as ctx:
+            self.tr.start_login()
+        self.assertIn("426", str(ctx.exception))
+
+    def test_start_login_needs_a_process_id(self):
+        self.tr.session = FakeSession(posts=[FakeResponse(200, {})])
+        with self.assertRaises(TRapiException):
+            self.tr.start_login()
+
+    def test_waits_for_the_approval_in_the_app(self):
+        self.tr.session = FakeSession(gets=[
+            FakeResponse(200, {"status": "PENDING"}),
+            FakeResponse(200, {"status": "PENDING"}),
+            FakeResponse(200, {"status": "CONFIRMED"}),
+        ])
+        state = self.tr.await_login_confirmation("pid", timeout=5, interval=0)
+        self.assertEqual(state["status"], "CONFIRMED")
+        self.assertEqual(len(self.tr.session.get_calls), 3)
+
+    def test_gives_up_when_the_approval_does_not_come(self):
+        self.tr.session = FakeSession()
+        self.tr.session.gets = [FakeResponse(200, {"status": "PENDING"})] * 50
+        with self.assertRaises(TRapiExcLoginPending):
+            self.tr.await_login_confirmation("pid", timeout=0.05, interval=0)
+
+    def test_login_with_a_code_verifies_instead_of_waiting(self):
+        self.tr.session = FakeSession(posts=[
+            FakeResponse(200, {"processId": "pid"}),
+            FakeResponse(200, {}),
+        ])
+        self.tr.session.cookies.set("tr_session", "value")
+        self.tr.login(code="123456")
+
+        verify_url = self.tr.session.post_calls[1][0]
+        self.assertIn("/authenticator-verification", verify_url)
+        self.assertEqual(self.tr.session.get_calls, [])
+
+    def test_login_fails_without_a_session_cookie(self):
+        self.tr.session = FakeSession(posts=[
+            FakeResponse(200, {"processId": "pid"}),
+            FakeResponse(200, {}),
+        ])
+        with self.assertRaises(TRapiException):
+            self.tr.login(code="123456")
+
+    def test_logged_in_follows_the_session_cookie(self):
+        self.tr.session = FakeSession()
+        self.assertFalse(self.tr.logged_in)
+        self.tr.session.cookies.set("tr_session", "value")
+        self.assertTrue(self.tr.logged_in)
+
+
+class WebsocketAuthTest(unittest.TestCase):
+    def test_cookies_are_sent_with_the_connection(self):
+        tr = api()
+        tr.session = FakeSession()
+        tr.session.cookies.set("tr_session", "s")
+        tr.session.cookies.set("tr_refresh", "r")
+
+        captured = {}
+
+        async def fake_connect(url, **kwargs):
+            captured.update(kwargs)
+            return FakeWebsocket()
+
+        with mock.patch("trapi.api.websockets.connect", fake_connect):
+            run(tr.connect_websocket())
+
+        cookie = captured.get("additional_headers", captured.get("extra_headers"))["Cookie"]
+        self.assertIn("tr_session=s", cookie)
+        self.assertIn("tr_refresh=r", cookie)
+
+    def test_no_cookie_header_without_a_session(self):
+        tr = api()
+        tr.session = FakeSession()
+        captured = {}
+
+        async def fake_connect(url, **kwargs):
+            captured.update(kwargs)
+            return FakeWebsocket()
+
+        with mock.patch("trapi.api.websockets.connect", fake_connect):
+            run(tr.connect_websocket())
+
+        self.assertEqual(captured, {})
 
 
 class AggregateHistoryLightTest(unittest.TestCase):

@@ -25,6 +25,11 @@ class TRapiExcServerUnknownState(TRapiException):
     pass
 
 
+class TRapiExcLoginPending(TRapiException):
+    """The second factor was not confirmed within the given time."""
+    pass
+
+
 class TRApi:
     url = "https://api.traderepublic.com"
 
@@ -32,6 +37,14 @@ class TRApi:
     # rejects outdated versions with "failed <latest>". As of 2026-08 the
     # server accepts 26 - 34; anything outside that range is refused.
     connect_version = 31
+
+    # The REST endpoints require a client identification. Without
+    # X-TR-Device-Info they answer MISSING_REQUIRED_HEADER, with an outdated
+    # version CLIENT_VERSION_OUTDATED.
+    app_version = "2.2631.13"
+    platform = "web-pro"
+    user_agent = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
 
     # The server validates the client identification sent along with the
     # handshake, so it has to look like one of the official frontends.
@@ -52,6 +65,8 @@ class TRApi:
         self.ws = None
         self.sessionToken = None
         self.refreshToken = None
+        # The web login keeps its state in cookies rather than in a token.
+        self.session = requests.Session()
         self.mu = asyncio.Lock()
         self.started = False
 
@@ -63,6 +78,160 @@ class TRApi:
 
         self.latest_response = {}
 
+    def device_info(self):
+        """The device description the REST endpoints insist on.
+
+        The device id has to stay the same across logins, so it is derived
+        from the phone number rather than generated randomly.
+        """
+        stable_id = hashlib.sha512(str(self.number).encode()).hexdigest()
+        return {
+            "stableDeviceId": stable_id,
+            "browser": "Chrome",
+            "browserVersion": "146.0.0.0",
+            "os": "Linux",
+            "osVersion": "x86_64",
+            "timezone": "Europe/Berlin",
+            "timezoneOffset": -60,
+            "screen": "1920x1080x24",
+            "preferredLanguages": [self.locale],
+            "numberOfCores": 8,
+        }
+
+    def web_headers(self):
+        """Headers every REST call of the web login needs."""
+        info = base64.b64encode(
+            json.dumps(self.device_info()).encode()
+        ).decode("ascii")
+        return {
+            "Content-Type": "application/json",
+            "User-Agent": self.user_agent,
+            "X-TR-App-Version": self.app_version,
+            "X-Tr-Platform": self.platform,
+            "X-TR-Device-Info": info,
+            "Accept-Language": self.locale,
+        }
+
+    def start_login(self):
+        """Starts a login and triggers the second factor.
+
+        :return: the whole response, its "processId" identifies the login
+        """
+        r = self.session.post(
+            f"{self.url}/api/v2/auth/web/login",
+            json={"phoneNumber": self.number, "pin": self.pin},
+            headers=self.web_headers(),
+            timeout=30,
+        )
+        if r.status_code != 200:
+            raise TRapiException(
+                f"could not start the login: HTTP {r.status_code} {r.text}"
+            )
+        data = r.json()
+        if not data.get("processId"):
+            raise TRapiException(f"login response without a processId: {data}")
+        return data
+
+    def login_state(self, process_id):
+        """Asks how far a running login got.
+
+        :return: the response, "status" is CONFIRMED once the customer
+            approved the login in the app
+        """
+        r = self.session.get(
+            f"{self.url}/api/v2/auth/web/login/processes/{process_id}",
+            headers=self.web_headers(),
+            timeout=30,
+        )
+        if r.status_code != 200:
+            raise TRapiException(
+                f"could not read the login state: HTTP {r.status_code} {r.text}"
+            )
+        return r.json()
+
+    def verify_login(self, process_id, code):
+        """Confirms a login with a code, e.g. the one sent by SMS."""
+        r = self.session.post(
+            f"{self.url}/api/v2/auth/web/login/processes/{process_id}"
+            f"/authenticator-verification",
+            json={"code": code},
+            headers=self.web_headers(),
+            timeout=30,
+        )
+        if r.status_code != 200:
+            raise TRapiException(
+                f"could not verify the login: HTTP {r.status_code} {r.text}"
+            )
+        return r
+
+    def await_login_confirmation(self, process_id, timeout=120, interval=2.0):
+        """Waits until the customer approved the login in the app.
+
+        :param timeout: how long to wait in seconds
+        :param interval: seconds between two checks
+        """
+        deadline = time.monotonic() + timeout
+        state = None
+        while time.monotonic() < deadline:
+            state = self.login_state(process_id)
+            if state.get("status") == "CONFIRMED" or self.logged_in:
+                return state
+            time.sleep(interval)
+
+        raise TRapiExcLoginPending(
+            f"login was not confirmed within {timeout}s, last state: {state}"
+        )
+
+    @property
+    def logged_in(self):
+        """Whether the session cookie the server hands out is present."""
+        return bool(self.session.cookies.get("tr_session"))
+
+    def login(self, code=None, timeout=120, **kwargs):
+        """Logs in through the web flow.
+
+        Trade Republic asks for a second factor. Newer accounts get a push
+        notification that has to be approved in the app, older ones an SMS
+        with a code.
+
+        :param code: the code when the second factor is an SMS. Leave it at
+            None to wait for the approval in the app.
+        :param timeout: how long to wait for the approval in the app
+        :return: the state of the finished login
+        """
+        data = self.start_login()
+        process_id = data["processId"]
+
+        if code is not None:
+            self.verify_login(process_id, code)
+            state = {"status": "CONFIRMED"}
+        else:
+            state = self.await_login_confirmation(process_id, timeout=timeout)
+
+        if not self.logged_in:
+            raise TRapiException(
+                f"login finished without a session cookie, state: {state}"
+            )
+        return state
+
+    def refresh_session(self):
+        """Extends the session. It expires after a few minutes of silence."""
+        r = self.session.get(
+            f"{self.url}/api/v1/auth/web/session",
+            headers=self.web_headers(),
+            timeout=30,
+        )
+        if r.status_code != 200:
+            raise TRapiException(
+                f"could not refresh the session: HTTP {r.status_code} {r.text}"
+            )
+        return r
+
+    def cookie_header(self):
+        """The cookies of the session as one header value."""
+        return "; ".join(f"{c.name}={c.value}" for c in self.session.cookies)
+
+    @deprecated(reason="Trade Republic retired the device login, use login()")
     def register_new_device(self, processId=None):
         self.signing_key = SigningKey.generate(curve=NIST256p, hashfunc=hashlib.sha512)
         if processId is None:
@@ -93,17 +262,27 @@ class TRApi:
             json={"code": token, "deviceKey": pubkey},
         )
 
-        if r.status_code == 200:
-            key = self.signing_key.to_pem()
-            with open("key", "wb") as f:
-                f.write(key)
+        if r.status_code != 200:
+            # Returning None here made the login start a second registration,
+            # which asks Trade Republic for another confirmation.
+            raise TRapiException(
+                f"Could not register the device: HTTP {r.status_code} {r.text}"
+            )
 
-            return key
-        else:
-            print("no")
+        key = self.signing_key.to_pem()
+        with open("key", "wb") as f:
+            f.write(key)
 
-    def login(self, **kwargs):
+        return key
 
+    @deprecated(reason="Trade Republic retired the device login, use login()")
+    def device_login(self, **kwargs):
+        """The former login through a registered device.
+
+        .. deprecated::
+            /api/v1/auth/login answers with HTTP 426 CLIENT_VERSION_OUTDATED,
+            the endpoint is no longer served. Use :meth:`login`.
+        """
         res = None
         if os.path.isfile("key"):
             res = self.do_request(
@@ -112,16 +291,20 @@ class TRApi:
             )
 
         # The user is currently signed in with a different device
-        if res == None or (
-                res.status_code == 401
-                and not kwargs.get("already_tried_registering", False)
-        ):
+        already_tried = kwargs.get("already_tried_registering", False)
+        if not already_tried and (res is None or res.status_code == 401):
             self.register_new_device()
-            res = self.login(already_tried_registering=True)
+            res = self.device_login(already_tried_registering=True)
+
+        if res is None:
+            raise TRapiException(
+                "no device key available - register the device first"
+            )
 
         if res.status_code != 200:
-            print(res.json(), res.status_code)
-            raise TRapiException("could not login - see printed status_code")
+            raise TRapiException(
+                f"could not login: HTTP {res.status_code} {res.text}"
+            )
 
         data = res.json()
         self.refreshToken = data["refreshToken"]
@@ -134,7 +317,7 @@ class TRApi:
 
     async def sub(self, payload_key, callback, **kwargs):
         if self.ws is None:
-            self.ws = await websockets.connect("wss://api.traderepublic.com")
+            self.ws = await self.connect_websocket()
             msg = json.dumps(dict(self.connect_payload, locale=self.locale))
             await self.ws.send(f"connect {self.connect_version} {msg}")
             response = await self.ws.recv()
@@ -148,10 +331,9 @@ class TRApi:
                 )
 
         payload = kwargs.get("payload", {"type": payload_key})
-        # Only authenticated topics expect a token. Sending "token": null makes
-        # the server reject some public topics with a JSON_PARSE_ERROR.
-        if self.sessionToken is not None:
-            payload["token"] = self.sessionToken
+        # The web login authenticates the connection through its cookies, so
+        # the subscriptions carry no token any more. Sending one makes the
+        # server reject some topics with a JSON_PARSE_ERROR.
 
         key = kwargs.get("key", payload_key)
         id = self.type_to_id(key)
@@ -189,6 +371,21 @@ class TRApi:
         return requests.request(
             method="POST", url=f"{self.url}{path}", data=payload_string, headers=headers
         )
+
+    async def connect_websocket(self):
+        """Opens the websocket, authenticated through the session cookies."""
+        url = "wss://api.traderepublic.com"
+        cookies = self.cookie_header()
+        if not cookies:
+            # Topics that need no login work without a session.
+            return await websockets.connect(url)
+
+        headers = {"Cookie": cookies}
+        try:
+            return await websockets.connect(url, additional_headers=headers)
+        except TypeError:
+            # websockets < 14 spells the argument differently
+            return await websockets.connect(url, extra_headers=headers)
 
     async def get_data(self):
         return await self.ws.recv()
@@ -1215,6 +1412,56 @@ class TrBlockingApi(TRApi):
     def portfolio(self):
         return self._loop.run_until_complete(
             self.get_one(super().portfolio())
+        )
+
+    def portfolio_status(self):
+        return self._loop.run_until_complete(
+            self.get_one(super().portfolio_status())
+        )
+
+    def price_alarms(self):
+        return self._loop.run_until_complete(
+            self.get_one(super().price_alarms())
+        )
+
+    def savings_plans(self):
+        return self._loop.run_until_complete(
+            self.get_one(super().savings_plans())
+        )
+
+    def timeline_actions_v2(self):
+        return self._loop.run_until_complete(
+            self.get_one(super().timeline_actions_v2())
+        )
+
+    def trading_perk_condition_status(self):
+        return self._loop.run_until_complete(
+            self.get_one(super().trading_perk_condition_status())
+        )
+
+    def watchlist(self):
+        return self._loop.run_until_complete(
+            self.get_one(super().watchlist())
+        )
+
+    def watchlists(self):
+        return self._loop.run_until_complete(
+            self.get_one(super().watchlists())
+        )
+
+    def neon_search_tags(self):
+        return self._loop.run_until_complete(
+            self.get_one(super().neon_search_tags())
+        )
+
+    def home_instrument_exchange(self, instrument_id):
+        return self._loop.run_until_complete(
+            self.get_one(super().home_instrument_exchange(instrument_id))
+        )
+
+    def derivatives(self, isin, product_category):
+        return self._loop.run_until_complete(
+            self.get_one(super().derivatives(isin, product_category))
         )
 
     def portfolio_aggregate_history(self, range="max"):
