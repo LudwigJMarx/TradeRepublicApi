@@ -11,6 +11,7 @@ import base64
 import json
 import time
 import unittest
+import uuid
 from unittest import mock
 
 import requests
@@ -399,6 +400,48 @@ class KeepaliveWiringTest(unittest.TestCase):
 
         self.assertEqual(launched, [])
         self.assertIsNone(tr._keepalive_task)
+
+
+class CreateOrderPayloadTest(unittest.TestCase):
+    """#22 reported a JSON_PARSE_ERROR that quotes the payload back and says
+    nothing about which field is wrong. Two things cause it, and the report
+    had both."""
+
+    def payload_of(self, **kwargs):
+        arguments = dict(order_id="b72fd7a2-f738-45e2-b4bc-2bae607109af",
+                         isin="DE0007037129", order_type="buy", size=1,
+                         limit=21.78, expiry="gfd")
+        arguments.update(kwargs)
+        tr, ws = api(), FakeWebsocket()
+        with connected(ws):
+            run(tr.simple_create_order(**arguments))
+        return sent_payload(ws)
+
+    def test_numbers_go_out_as_numbers(self):
+        # Strings here are what the server refuses.
+        payload = self.payload_of(size="1", limit="21.78")
+        self.assertEqual(payload["parameters"]["size"], 1.0)
+        self.assertEqual(payload["parameters"]["limit"], 21.78)
+
+    def test_something_that_is_not_a_number_says_so(self):
+        with self.assertRaises(TRapiException) as ctx:
+            self.payload_of(limit="cheap")
+        self.assertIn("limit", str(ctx.exception))
+
+    def test_the_process_id_has_to_be_a_uuid(self):
+        with self.assertRaises(TRapiException) as ctx:
+            self.payload_of(order_id="some-id")
+        self.assertIn("uuid", str(ctx.exception))
+
+    def test_a_process_id_can_be_generated(self):
+        payload = self.payload_of(order_id=None)
+        uuid.UUID(payload["clientProcessId"])
+
+    def test_a_uuid_without_dashes_is_fine(self):
+        # The server accepts it, so the library should not be stricter.
+        plain = "b72fd7a2f73845e2b4bc2bae607109af"
+        self.assertEqual(self.payload_of(order_id=plain)["clientProcessId"],
+                         plain)
 
 
 class StaleSubscriptionTest(unittest.TestCase):
