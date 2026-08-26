@@ -28,10 +28,12 @@ __all__ = [
     "EVENT_TYPES",
     "Transaction",
     "detail_documents",
+    "document_url",
     "detail_isin",
     "detail_row",
     "detail_rows",
     "parse_decimal",
+    "parse_quantity_and_price",
     "parse_timestamp",
     "sections_of",
     "transaction_of",
@@ -41,22 +43,27 @@ __all__ = [
 
 # ---------------------------------------------------------------- parsing
 
-_NUMBER = re.compile(r"-?\d[\d.,\s ']*\d|-?\d")
+_NUMBER = re.compile(r"-?\d[\d.,\s\u00a0']*\d|-?\d")
+_CURRENCY = re.compile(r"[\u20ac$\u00a3\u00a5]|\b[A-Z]{3}\b")
+_TIMES = re.compile(r"\s*[\u00d7xX*]\s*")
 
 
-def parse_decimal(text, decimal_separator=","):
+def parse_decimal(text, decimal_separator=None):
     """Reads the number out of a rendered value.
 
-    The API delivers values the way they are shown, so they carry a currency
-    symbol, grouping and a locale specific decimal separator.
+    The API delivers values the way it shows them, so they carry a currency
+    symbol and locale specific separators - and it is not consistent about it.
+    One and the same response mixes "\u20ac26.55" with "9,99 \u20ac", so which
+    separator means what is worked out per value instead of being assumed:
 
-    >>> parse_decimal("1.234,56 EUR")
-    Decimal('1234.56')
-    >>> parse_decimal("1,234.56", decimal_separator=".")
-    Decimal('1234.56')
+    * with both separators present the rightmost one is the decimal one
+    * with only one, three digits behind it mean grouping when the value is an
+      amount of money, because money is rendered with two decimals. Without a
+      currency it is a decimal separator, which keeps share counts such as
+      "0.347" intact.
 
     :param text: the rendered value
-    :param decimal_separator: "," for German output, "." for English
+    :param decimal_separator: "," or "." to skip the detection
     :return: the number, or None when there is none
     """
     if text is None:
@@ -64,19 +71,69 @@ def parse_decimal(text, decimal_separator=","):
     if isinstance(text, (int, float, Decimal)):
         return Decimal(str(text))
 
-    match = _NUMBER.search(str(text))
+    text = str(text)
+    match = _NUMBER.search(text)
     if not match:
         return None
 
-    number = re.sub(r"[\s ']", "", match.group(0))
-    grouping = "." if decimal_separator == "," else ","
-    number = number.replace(grouping, "")
-    number = number.replace(decimal_separator, ".")
+    number = re.sub(r"[\s\u00a0']", "", match.group(0))
+
+    if decimal_separator is None:
+        decimal_separator = _detect_separator(number, text)
+
+    if decimal_separator:
+        grouping = "." if decimal_separator == "," else ","
+        number = number.replace(grouping, "").replace(decimal_separator, ".")
+    else:
+        number = number.replace(".", "").replace(",", "")
 
     try:
         return Decimal(number)
     except InvalidOperation:
         return None
+
+
+def _detect_separator(number, text):
+    """Which of the separators in a rendered number is the decimal one.
+
+    :return: "," or "." , or None when every separator groups digits
+    """
+    last_dot = number.rfind(".")
+    last_comma = number.rfind(",")
+
+    if last_dot >= 0 and last_comma >= 0:
+        return "." if last_dot > last_comma else ","
+
+    position = max(last_dot, last_comma)
+    if position < 0:
+        return None
+
+    digits_behind = len(number) - position - 1
+
+    # Money carries two decimals, so three digits behind the separator group
+    # thousands. Without a currency the value is a count, and there the
+    # separator is a decimal one - share counts have more than two digits.
+    if digits_behind == 3 and _CURRENCY.search(text):
+        return None
+    return number[position]
+
+
+def parse_quantity_and_price(text):
+    """Splits a transaction row into how many and at what price.
+
+    The detail has no row per value. It renders a trade as
+    "0.347123 \u00d7 \u20ac26.55" in a single row, so both numbers come from there.
+
+    :return: (quantity, price), either of them None when it is not there
+    """
+    if not text:
+        return None, None
+
+    parts = _TIMES.split(str(text), 1)
+    if len(parts) != 2:
+        # Some events render an amount without a quantity.
+        return None, parse_decimal(text)
+    return parse_decimal(parts[0]), parse_decimal(parts[1])
 
 
 def parse_timestamp(value):
@@ -171,11 +228,15 @@ def detail_row(detail, *labels):
     return None
 
 
+_LOGO_ISIN = re.compile(r"logos/([A-Z]{2}[A-Z0-9]{9}\d)/")
+
+
 def detail_isin(detail):
     """The isin of the instrument a detail belongs to.
 
-    The header section links to the instrument, which is where the isin the
-    events themselves never carried finally comes from.
+    The header links to the instrument, which is where the isin the events
+    themselves never carried finally comes from. When the link is missing the
+    logo of the instrument still carries it in its path.
     """
     for section in sections_of(detail, "header"):
         action = section.get("action")
@@ -183,14 +244,31 @@ def detail_isin(detail):
             payload = action.get("payload")
             if payload:
                 return str(payload)
+
+    for section in sections_of(detail, "header"):
+        data = section.get("data")
+        if not isinstance(data, dict):
+            continue
+        icon = data.get("icon")
+        asset = icon.get("asset") if isinstance(icon, dict) else None
+        match = _LOGO_ISIN.search(str(asset or ""))
+        if match:
+            return match.group(1)
     return None
 
 
 def detail_documents(detail):
-    """The documents of a detail as a list of {"title", "url"}.
+    """The documents of a detail.
 
-    Everything that is not a link is skipped, so the result is safe to hand
-    to a downloader.
+    Trade Republic attaches them in two different ways and only one of them
+    is a plain link:
+
+    * ``browserModal`` carries a ready to use URL in its payload
+    * ``authenticatedBrowserModal`` carries an object with a ``path`` that
+      has to be fetched with the cookies of the session
+
+    :return: a list of dicts with "title", "id" and either "url" or "path".
+        Both keys are always present, the one that does not apply is None.
     """
     documents = []
     for section in sections_of(detail):
@@ -199,46 +277,105 @@ def detail_documents(detail):
         data = section.get("data")
         if not isinstance(data, list):
             continue
+
         for row in data:
             if not isinstance(row, dict):
                 continue
             action = row.get("action")
             if not isinstance(action, dict):
                 continue
-            url = action.get("payload")
-            if not isinstance(url, str) or not url.startswith("http"):
+
+            payload = action.get("payload")
+            url, path = None, None
+
+            if isinstance(payload, str) and payload.startswith("http"):
+                url = payload
+            elif isinstance(payload, dict):
+                candidate = payload.get("path")
+                if isinstance(candidate, str) and candidate:
+                    path = candidate
+            if url is None and path is None:
                 continue
-            documents.append({"title": row.get("title") or "", "url": url})
+
+            documents.append({
+                "title": row.get("title") or "",
+                "url": url,
+                "path": path,
+                "id": row.get("id"),
+            })
     return documents
+
+
+def document_url(document, host="https://api.traderepublic.com"):
+    """The address a document is fetched from.
+
+    A document that came as a path needs the session, so fetch that one
+    through the requests session of a logged in client rather than plainly.
+    """
+    if document.get("url"):
+        return document["url"]
+    path = document.get("path")
+    if not path:
+        return None
+    return host.rstrip("/") + "/" + str(path).lstrip("/")
 
 
 # ------------------------------------------------------------------ mapping
 
-#: Labels of the rows the export reads. Trade Republic renders them in the
-#: language the API was asked for, so add your own when you use another one.
+#: Labels of the rows the export reads, as the API renders them. It answers
+#: in the language it was asked for, so both are listed. A detail has no row
+#: per value: a trade renders as one "transaction" row holding quantity and
+#: price together, which is why there is no label for either on its own.
 LABELS = {
-    "shares": ("Anteile", "Aktien", "Anzahl", "Stück", "Shares", "Quantity"),
-    "price": ("Aktienkurs", "Kurs", "Preis", "Share price", "Price"),
-    "fee": ("Gebühr", "Gebühren", "Fremdkostenzuschlag", "Fee", "Fees"),
-    "tax": ("Steuern", "Steuer", "Kapitalertragsteuer", "Tax", "Taxes"),
-    "total": ("Gesamt", "Summe", "Total"),
+    "transaction": ("Transaction", "Transaktion", "Ausf\u00fchrung"),
+    "fee": ("Fee", "Fees", "Geb\u00fchr", "Geb\u00fchren",
+            "Fremdkostenzuschlag"),
+    "tax": ("Tax", "Taxes", "Steuer", "Steuern", "Kapitalertragsteuer"),
+    "total": ("Total", "Gesamt", "Summe"),
+    "accrued": ("Accrued", "Angefallen", "Erhalten"),
 }
 
-#: eventType of an event -> what it means for an export. "trade" takes its
+#: eventType of an event -> what it means for the export. "trade" takes its
 #: direction from the sign of the amount, everything else is fixed.
+#:
+#: Recorded against a real account in August 2026. Events that are not listed
+#: are reported by the converter instead of being dropped, so a new kind shows
+#: up rather than going missing.
 EVENT_TYPES = {
+    # Securities. ORDER_EXECUTED and SAVINGS_PLAN_EXECUTED are the older
+    # names and still appear on entries from back then.
     "TRADING_TRADE_EXECUTED": "trade",
-    "TRADING_SAVINGSPLAN_EXECUTED": "buy",
     "ORDER_EXECUTED": "trade",
+    "TRADING_SAVINGSPLAN_EXECUTED": "buy",
     "SAVINGS_PLAN_EXECUTED": "buy",
+    # Round-ups and the saveback bonus end in a purchase as well, and their
+    # detail carries the instrument and a transaction row like a trade does.
+    "SPARE_CHANGE_AGGREGATE": "buy",
+    "SAVEBACK_AGGREGATE": "buy",
+    # Cash
     "BANK_TRANSACTION_INCOMING": "deposit",
+    "PAYMENT_INBOUND_SEPA_DIRECT_DEBIT": "deposit",
     "BANK_TRANSACTION_OUTGOING": "removal",
-    "PAYMENT_INBOUND": "deposit",
     "PAYMENT_OUTBOUND": "removal",
+    "CARD_TRANSACTION": "removal",
+    # Income
     "INTEREST_PAYOUT": "interest",
-    "INTEREST_PAYOUT_CREATED": "interest",
-    "SSP_CORPORATE_ACTION_INVOICE_CASH": "dividend",
-    "CREDIT": "dividend",
+    "SSP_CORPORATE_ACTION_CASH": "dividend",
+}
+
+#: Events deliberately left out, with the reason. They are listed here rather
+#: than only in EVENT_TYPES so that the next person does not have to work out
+#: why they are missing.
+NOT_EXPORTED = {
+    # The invoice for a trade that is already in the export under its own
+    # event. Exporting both would count the same trade twice.
+    "TRADE_INVOICE": "the trade itself is already exported",
+    "SAVINGS_PLAN_INVOICE_CREATED": "the execution itself is already exported",
+    # Announces a payout that arrives as INTEREST_PAYOUT.
+    "INTEREST_PAYOUT_CREATED": "the payout itself is already exported",
+    # Card housekeeping rather than money that moved.
+    "CARD_VERIFICATION": "no money moves",
+    "CARD_AFT": "unclear which way the money goes, needs checking",
 }
 
 #: Column titles, kept as they were so existing import profiles still match.
@@ -292,17 +429,17 @@ def _plain(value):
     return "" if value is None else str(value)
 
 
-def transaction_of(event, detail=None, decimal_separator=","):
+def transaction_of(event, detail=None, decimal_separator=None):
     """Turns a timeline event and its detail into a :class:`Transaction`.
 
     :param event: one entry of a timelineTransactions response
     :param detail: the matching timelineDetailV2 response, optional. Without
-        it there are no shares, no price and no isin, because the event does
+        it there is no quantity, no price and no isin, because the event does
         not carry them.
-    :param decimal_separator: the one the rendered values use
-    :return: the transaction, or None when the event is not one - cancelled
-        events, events the mapping does not know and events the customer
-        deleted are skipped
+    :param decimal_separator: "," or "." to skip the per value detection
+    :return: the transaction, or None when the event is not one. Cancelled
+        events, deleted ones and events whose type is not in
+        :data:`EVENT_TYPES` are skipped.
     """
     if not isinstance(event, dict):
         return None
@@ -318,7 +455,7 @@ def transaction_of(event, detail=None, decimal_separator=","):
         return None
 
     amount = event.get("amount") or {}
-    value = parse_decimal(amount.get("value"))
+    value = parse_decimal(amount.get("value"), decimal_separator)
 
     if kind == "trade":
         if value is None:
@@ -326,19 +463,25 @@ def transaction_of(event, detail=None, decimal_separator=","):
         # Money leaving the account pays for something.
         kind = "buy" if value < 0 else "sell"
 
-    def row(key):
-        return parse_decimal(detail_row(detail, *LABELS[key]),
-                             decimal_separator=decimal_separator)
+    def value_of(key):
+        return parse_decimal(detail_row(detail, *LABELS[key]), decimal_separator)
+
+    quantity, price = None, None
+    if detail is not None:
+        quantity, price = parse_quantity_and_price(
+            detail_row(detail, *LABELS["transaction"]))
+        if value is None:
+            value = value_of("total")
 
     return Transaction(
         date=parse_timestamp(event.get("timestamp")),
         kind=kind,
-        shares=row("shares") if detail else None,
-        price=row("price") if detail else None,
+        shares=quantity,
+        price=price,
         value=abs(value) if value is not None else None,
-        fee=row("fee") if detail else None,
-        tax=row("tax") if detail else None,
-        isin=detail_isin(detail) if detail else None,
+        fee=value_of("fee") if detail is not None else None,
+        tax=value_of("tax") if detail is not None else None,
+        isin=detail_isin(detail) if detail is not None else None,
         name=event.get("title"),
         currency=amount.get("currency"),
         event_type=event.get("eventType"),

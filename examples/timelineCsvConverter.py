@@ -23,7 +23,12 @@ import json
 import os
 from collections import Counter
 
-from trapi.timeline import EVENT_TYPES, transaction_of, write_csv
+from trapi.timeline import (
+    EVENT_TYPES,
+    NOT_EXPORTED,
+    transaction_of,
+    write_csv,
+)
 
 from environment import *
 
@@ -31,8 +36,6 @@ TIMELINE_FILE = "./myTimeline.json"
 DETAILS_FILE = "./myTimelineDetails.json"
 CSV_FILE = "./myTransactions.csv"
 
-# The API renders its values in the language it was asked for.
-DECIMAL_SEPARATOR = "," if LOCALE == "de" else "."
 
 
 def load(path, default=None):
@@ -61,11 +64,9 @@ def main():
         if not isinstance(item, dict):
             continue
 
-        transaction = transaction_of(
-            item,
-            details.get(item.get("id")),
-            decimal_separator=DECIMAL_SEPARATOR,
-        )
+        # No fixed decimal separator: one and the same response mixes
+        # "€26.55" and "9,99 €", so each value is read on its own.
+        transaction = transaction_of(item, details.get(item.get("id")))
         if transaction is None:
             event_type = item.get("eventType") or "without an eventType"
             known = event_type in EVENT_TYPES
@@ -88,10 +89,18 @@ def main():
 
     if skipped:
         print("\nnot exported:")
+        unknown = False
         for reason, count in skipped.most_common():
-            print(f"  {count:>5}  {reason}")
-        print("\nAn eventType listed here that should end up in the export "
-              "belongs in EVENT_TYPES in trapi/timeline.py.")
+            explanation = NOT_EXPORTED.get(reason)
+            if explanation:
+                print(f"  {count:>5}  {reason} - {explanation}")
+            else:
+                print(f"  {count:>5}  {reason}")
+                unknown = reason not in ("cancelled or deleted",)
+        if unknown:
+            print("\nAn eventType listed without a reason is one this "
+                  "converter does not know yet. If it belongs in the export, "
+                  "add it to EVENT_TYPES in trapi/timeline.py.")
 
 
 if __name__ == "__main__":
