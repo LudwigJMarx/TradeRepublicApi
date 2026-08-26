@@ -1043,12 +1043,36 @@ class TRApi:
 
         Login required!
 
-        The payload below still passes the validation of the server as of
-        August 2026, checked by sending it without a session: it is refused
-        for the missing token rather than for its shape, and dropping
-        warningsShown or acceptedWarnings makes the validation fail. Whether
-        an order it creates behaves correctly is untested - that cannot be
-        checked without placing a real one.
+        Confirmed against a real account in August 2026: the payload below
+        reaches the order engine and is processed. Dropping warningsShown or
+        acceptedWarnings makes the validation fail, so both are required.
+
+        A rejection comes back as a normal answer rather than as an error
+        state, so it has to be looked at::
+
+            {"status": "failed",
+             "message": "Insufficient funds for this operation.",
+             "error": {"code": "cashMissing",
+                       "message": "...",
+                       "details": {"cause": "...", "exchangeId": "LSXCS",
+                                   "isin": "...", "portfolioId": None,
+                                   "secAccNo": "...", "userId": "..."}}}
+
+        Note that details.exchangeId is not what was sent: "LSX" comes back
+        as "LSXCS".
+
+        The answer to an accepted order has not been seen yet - checking that
+        means placing one that actually goes through.
+
+        :param order_id: a fresh uuid identifying this attempt
+        :param isin: the instrument's isin
+        :param order_type: "buy" or "sell"
+        :param size: how many
+        :param limit: the limit price
+        :param expiry: "gfd" expires at the end of the day, "gtd" on a date,
+            "gtc" stands until it is cancelled
+        :param exchange: the exchange to trade at
+        :param callback: callback function
         """
         if expiry not in self.expiry_list:
             raise TRapiException(f"Expiry must be either of {self.expiry_list}")
