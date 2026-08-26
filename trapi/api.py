@@ -533,7 +533,27 @@ class TRApi:
     # todo availableSize
 
     async def cancel_order(self, id, callback=print):
-        """cancelOrder request"""
+        """cancelOrder request
+
+        Login required!
+
+        Answers in the same shape as :meth:`simple_create_order`, so read
+        "status" rather than relying on an exception. A refusal looks like
+        this - note that it carries yet another error shape, with a code and
+        details but no cause::
+
+            {"status": "failed",
+             "message": "cannot cancel a terminated order",
+             "error": {"code": "internalError",
+                       "details": {"orderId": "<uuid>"}}}
+
+        The answer to a cancellation that goes through has not been seen: the
+        orders available for the attempt terminated on their own before it
+        could reach them.
+
+        :param id: the orderId, as returned by simple_create_order
+        :param callback: callback function
+        """
         return await self.sub(
             "cancelOrder",
             payload={"type": "cancelOrder", "orderId": id},
@@ -902,6 +922,11 @@ class TRApi:
         Note that createdTime is milliseconds since the epoch here, while the
         timeline switched to ISO strings - the two do not agree.
 
+        **A "status" of "active" is not a guarantee.** An order was listed
+        here as active and, a second later, could not be cancelled because it
+        had already terminated. This listing lags behind, so an order that
+        shows up in it may be gone already.
+
         :param terminated: True lists the orders that are done instead
         :param callback: callback function
         """
@@ -1157,11 +1182,12 @@ class TRApi:
         the activity log, not among the transactions, and the customer got a
         notification about it.
 
-        It was a limit a third below the market, for a fractional size, and
-        Trade Republic had routed it to TIB rather than the LSX it was asked
-        for - a limit like that presumably cannot rest in that book. Whatever
-        the reason, an order has to be checked through :meth:`orders` after
-        it was placed rather than trusted for its answer.
+        Two attempts behaved the same way: a limit a third below the market,
+        for a fractional size, routed by Trade Republic to TIB rather than
+        the LSX it asked for, terminated within seconds. Presumably a limit
+        like that cannot rest in that book. Nothing here is a promise that
+        an order will stand - and :meth:`orders` is not proof either, see
+        there.
 
         :param order_id: a fresh uuid identifying this attempt
         :param isin: the instrument's isin
