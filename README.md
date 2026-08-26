@@ -50,9 +50,22 @@ tr = TrBlockingApi(NUMBER, PIN, connect_version=34)
 | `portfolio`, `compactPortfolio` | `compact_portfolio_by_type()` |
 | `timeline` | `timeline_transactions()`, `timeline_activity_log()` |
 | `timelineDetail` | `timeline_detail()` (now sends `timelineDetailV2`) |
+| `timelineActions` | `timeline_actions_v2()` |
+| `instrumentExchange` | `home_instrument_exchange()` |
 
-`neonCards`, `messageOfTheDay` and `instrumentSuitability` were removed without
-a replacement; the server answers them with `BAD_SUBSCRIPTION_TYPE`.
+Removed without a replacement, the server answers them with
+`BAD_SUBSCRIPTION_TYPE`: `portfolioAggregateHistory`,
+`portfolioAggregateHistoryLight`, `neonCards`, `messageOfTheDay`,
+`instrumentSuitability`, `frontendExperiment`, `settings`, `bondDetails`,
+`subscribeNews`, `unsubscribeNews`, `newsSubscriptions`, `confirmOrder`,
+`orderOverview`, `stockOrderDetails` and `cashAvailableForOrder`. The
+corresponding methods are kept but marked as deprecated.
+
+### Newly wired up
+
+`performance()`, `etf_details()`, `etf_composition()`, `crypto_details()`,
+`savings_plans()`, `watchlists()`, `trading_perk_condition_status()` and
+`timeline_actions_v2()`.
 
 ### Other behaviour worth knowing
 

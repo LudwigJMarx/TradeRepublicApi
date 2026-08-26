@@ -366,13 +366,60 @@ class TRApi:
             key=f"createSavingsPlan {params} {warnings_shown}"
         )
 
-    # todo cryptoDetails
-    # todo etfComposition
-    # todo etfDetails
+    async def crypto_details(self, id, callback=print):
+        """cryptoDetails request
+
+        No login required
+
+        :param id: the crypto instrument's id, e.g. "XF000BTC0017"
+        :param callback: callback function
+        """
+        return await self.sub(
+            "cryptoDetails",
+            payload={"type": "cryptoDetails", "id": id},
+            callback=callback,
+            key=f"cryptoDetails {id}",
+        )
+
+    async def etf_composition(self, id, callback=print):
+        """etfComposition request
+
+        No login required
+
+        :param id: the etf's isin
+        :param callback: callback function
+        :return: how the etf is composed by country, sector and holding
+        """
+        return await self.sub(
+            "etfComposition",
+            payload={"type": "etfComposition", "id": id},
+            callback=callback,
+            key=f"etfComposition {id}",
+        )
+
+    async def etf_details(self, id, callback=print):
+        """etfDetails request
+
+        No login required
+
+        :param id: the etf's isin
+        :param callback: callback function
+        """
+        return await self.sub(
+            "etfDetails",
+            payload={"type": "etfDetails", "id": id},
+            callback=callback,
+            key=f"etfDetails {id}",
+        )
+
     # todo  followWatchlist
 
+    @deprecated(reason="Removed by Trade Republic, the server answers with BAD_SUBSCRIPTION_TYPE")
     async def frontend_experiment(self, operation, experimentId, identifier, callback=print):
-        """frontendExperiment request"""
+        """frontendExperiment request
+
+        .. deprecated:: Removed by Trade Republic, no replacement.
+        """
         return await self.sub(
             "frontendExperiment",
             payload={"type": "frontendExperiment", "operation": operation, "experimentId": experimentId,
@@ -399,9 +446,14 @@ class TRApi:
             key=f"instrument {id}",
         )
 
-    # todo: there is a parameter needed, probably the exchange?
+    @deprecated(reason="Removed by Trade Republic. Use function home_instrument_exchange")
     async def instrument_exchange(self, instrument_id, callback=print):
-        """instrumentExchange request"""
+        """instrumentExchange request
+
+        .. deprecated::
+            The server answers with BAD_SUBSCRIPTION_TYPE. Use
+            :meth:`home_instrument_exchange` instead.
+        """
         return await self.sub(
             "instrumentExchange",
             payload={"type": "instrumentExchange", "instrumentId": instrument_id},
@@ -418,8 +470,12 @@ class TRApi:
             key=f"homeInstrumentExchange {instrument_id}",
         )
 
+    @deprecated(reason="Removed by Trade Republic, the server answers with BAD_SUBSCRIPTION_TYPE")
     async def instrument_suitability(self, instrument_id, callback=print):
-        """instrumentSuitability request"""
+        """instrumentSuitability request
+
+        .. deprecated:: Removed by Trade Republic, no replacement.
+        """
         return await self.sub(
             "instrumentSuitability",
             payload={"type": "instrumentSuitability", "instrumentId": instrument_id},
@@ -428,13 +484,21 @@ class TRApi:
         )
 
     # todo investableWatchlist
+    @deprecated(reason="Removed by Trade Republic, the server answers with BAD_SUBSCRIPTION_TYPE")
     async def message_of_the_day(self, callback=print):
-        """messageOfTheDay request"""
+        """messageOfTheDay request
+
+        .. deprecated:: Removed by Trade Republic, no replacement.
+        """
         await self.sub("messageOfTheDay", callback)
 
     # todo  namedWatchlist
+    @deprecated(reason="Removed by Trade Republic, the server answers with BAD_SUBSCRIPTION_TYPE")
     async def neon_cards(self, callback=print):
-        """neonCards request"""
+        """neonCards request
+
+        .. deprecated:: Removed by Trade Republic, no replacement.
+        """
         await self.sub("neonCards", callback)
 
     async def derivatives(self, isin, product_category, callback=print):
@@ -550,7 +614,25 @@ class TRApi:
             payload={"type": "orders", "terminated": terminated},
             key=f"orders {terminated}")
 
-    # todo  performance
+    async def performance(self, isin, exchange="LSX", callback=print):
+        """performance request
+
+        No login required
+
+        :param isin: the instrument's isin
+        :param exchange: the exchange the instrument is traded at
+        :param callback: callback function
+        :return: the price changes over the usual reference periods
+        """
+        if exchange not in self.exchange_list:
+            raise TRapiException(f"exchange must be either one of {self.exchange_list}")
+
+        return await self.sub(
+            "performance",
+            payload={"type": "performance", "id": f"{isin}.{exchange}"},
+            callback=callback,
+            key=f"performance {isin} {exchange}",
+        )
 
     @deprecated(reason="Removed by Trade Republic. Use function compact_portfolio_by_type")
     async def portfolio(self, callback=print):
@@ -562,8 +644,14 @@ class TRApi:
         """
         await self.sub("portfolio", callback)
 
+    @deprecated(reason="Removed by Trade Republic, the server answers with BAD_SUBSCRIPTION_TYPE")
     async def portfolio_aggregate_history(self, range="max", callback=print):
-        """portfolioAggregateHistory request"""
+        """portfolioAggregateHistory request
+
+        .. deprecated::
+            Removed by Trade Republic. portfolioAggregateHistoryLight is gone
+            as well and no websocket replacement could be found.
+        """
         if range not in self.range_list:
             raise TRapiException(f"Range of time must be either one of {self.range_list}")
         return await self.sub(
@@ -592,8 +680,17 @@ class TRApi:
             key=f"removeFromWatchlist {instrument_id}")
 
     # todo savingsPlanParameters
-    # todo  savingsPlans
-    # todo  settings
+
+    async def savings_plans(self, callback=print):
+        """savingsPlans request
+
+        Login required!
+
+        :return: the customer's savings plans
+        """
+        return await self.sub("savingsPlans", callback)
+
+    # The settings topic was removed by Trade Republic.
 
     async def simple_create_order(
             self,
@@ -755,9 +852,24 @@ class TRApi:
             key=f"timelineActivityLog {after}",
         )
 
+    @deprecated(reason="Removed by Trade Republic. Use function timeline_actions_v2")
     async def timeline_actions(self, callback=print):
-        """timelineActions request"""
+        """timelineActions request
+
+        .. deprecated::
+            The server answers with BAD_SUBSCRIPTION_TYPE. Use
+            :meth:`timeline_actions_v2` instead.
+        """
         return await self.sub("timelineActions", callback)
+
+    async def timeline_actions_v2(self, callback=print):
+        """timelineActionsV2 request
+
+        Login required!
+
+        :return: the actions Trade Republic currently suggests to the customer
+        """
+        return await self.sub("timelineActionsV2", callback)
 
     async def timeline_detail(self, id, callback=print):
         """timelineDetailV2 request
@@ -776,14 +888,28 @@ class TRApi:
             key=f"timelineDetailV2 {id}",
         )
 
-    #  todo tradingPerkConditionStatus
+    async def trading_perk_condition_status(self, callback=print):
+        """tradingPerkConditionStatus request
+
+        Login required!
+        """
+        return await self.sub("tradingPerkConditionStatus", callback)
+
     #  todo unfollowWatchlist
-    #  todo unsubscribeNews
+    # The subscribeNews / unsubscribeNews topics were removed by Trade Republic.
+
     async def watchlist(self, callback=print):
         """watchlist request"""
         return await self.sub("watchlist", callback)
 
-    #  todo watchlists
+    async def watchlists(self, callback=print):
+        """watchlists request
+
+        Login required!
+
+        :return: all watchlists of the customer
+        """
+        return await self.sub("watchlists", callback)
 
     # -----------------------------------------------------------
     # old names of functions
@@ -1007,9 +1133,29 @@ class TrBlockingApi(TRApi):
             self.get_one(super().compact_portfolio_by_type())
         )
 
+    def crypto_details(self, id):
+        return asyncio.get_event_loop().run_until_complete(
+            self.get_one(super().crypto_details(id))
+        )
+
+    def etf_composition(self, id):
+        return asyncio.get_event_loop().run_until_complete(
+            self.get_one(super().etf_composition(id))
+        )
+
+    def etf_details(self, id):
+        return asyncio.get_event_loop().run_until_complete(
+            self.get_one(super().etf_details(id))
+        )
+
     def instrument(self, id):
         return asyncio.get_event_loop().run_until_complete(
             self.get_one(super().instrument(id))
+        )
+
+    def performance(self, isin, exchange="LSX"):
+        return asyncio.get_event_loop().run_until_complete(
+            self.get_one(super().performance(isin, exchange=exchange))
         )
 
     def neon_search(self, query="", page=1, page_size=20, instrument_type="stock", jurisdiction="DE", ):

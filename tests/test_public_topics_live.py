@@ -13,6 +13,8 @@ import unittest
 from trapi.api import TrBlockingApi
 
 ISIN = "US0378331005"  # Apple Inc.
+ETF = "IE00B4L5Y983"  # iShares Core MSCI World
+CRYPTO = "XF000BTC0017"  # Bitcoin
 
 live = unittest.skipUnless(
     os.environ.get("TRAPI_LIVE_TESTS") == "1",
@@ -51,6 +53,18 @@ class PublicTopicsTest(unittest.TestCase):
 
     def test_neon_news(self):
         self.assertIsInstance(self.tr.neon_news(ISIN), list)
+
+    def test_performance(self):
+        self.assertIn("price_1y", self.tr.performance(ISIN))
+
+    def test_etf_details(self):
+        self.assertEqual(self.tr.etf_details(ETF)["isin"], ETF)
+
+    def test_etf_composition(self):
+        self.assertTrue(self.tr.etf_composition(ETF)["data"])
+
+    def test_crypto_details(self):
+        self.assertEqual(self.tr.crypto_details(CRYPTO)["isin"], CRYPTO)
 
 
 if __name__ == "__main__":
