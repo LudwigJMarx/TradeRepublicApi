@@ -931,7 +931,65 @@ class TRApi:
         """priceAlarms request"""
         return await self.sub("priceAlarms", callback)
 
-    # todo priceForOrder
+    async def price_for_order(self, isin, order_type="buy", exchange="LSX",
+                              size=None, mode=None, callback=print):
+        """priceForOrder request
+
+        No login required
+
+        The price an order would get right now. Useful before placing one,
+        and the only order related topic that answers without a session.
+
+        :param isin: the instrument's isin
+        :param order_type: "buy" or "sell" - the only required parameter
+        :param exchange: the exchange the instrument is traded at
+        :param size: how many, optional
+        :param mode: "market" or "limit", optional
+        :param callback: callback function
+        :return: currencyId, price, priceAsk, priceBid, priceFactor and time
+        """
+        if order_type not in self.order_type_list:
+            raise TRapiException(
+                f"order_type must be either of {self.order_type_list}")
+        if exchange not in self.exchange_list:
+            raise TRapiException(f"exchange must be either one of {self.exchange_list}")
+
+        parameters = {"instrumentId": isin, "exchangeId": exchange,
+                      "type": order_type}
+        if size is not None:
+            parameters["size"] = size
+        if mode is not None:
+            parameters["mode"] = mode
+
+        return await self.sub(
+            "priceForOrder",
+            payload={"type": "priceForOrder", "parameters": parameters},
+            callback=callback,
+            key=f"priceForOrder {isin} {exchange} {order_type} {size} {mode}",
+        )
+
+    async def available_size(self, isin, exchange="LSX", callback=print):
+        """availableSize request
+
+        Login required!
+
+        How much of an instrument can be traded at the moment.
+
+        :param isin: the instrument's isin
+        :param exchange: the exchange the instrument is traded at
+        :param callback: callback function
+        """
+        if exchange not in self.exchange_list:
+            raise TRapiException(f"exchange must be either one of {self.exchange_list}")
+
+        return await self.sub(
+            "availableSize",
+            payload={"type": "availableSize",
+                     "parameters": {"instrumentId": isin, "exchangeId": exchange}},
+            callback=callback,
+            key=f"availableSize {isin} {exchange}",
+        )
+
     async def remove_from_watchlist(self, instrument_id, callback=print):
         """removeFromWatchlist request"""
         return await self.sub(
@@ -964,7 +1022,17 @@ class TRApi:
             exchange="LSX",
             callback=print,
     ):
-        """simpleCreateOrder request"""
+        """simpleCreateOrder request
+
+        Login required!
+
+        The payload below still passes the validation of the server as of
+        August 2026, checked by sending it without a session: it is refused
+        for the missing token rather than for its shape, and dropping
+        warningsShown or acceptedWarnings makes the validation fail. Whether
+        an order it creates behaves correctly is untested - that cannot be
+        checked without placing a real one.
+        """
         if expiry not in self.expiry_list:
             raise TRapiException(f"Expiry must be either of {self.expiry_list}")
 
@@ -1499,6 +1567,19 @@ class TrBlockingApi(TRApi):
     def performance(self, isin, exchange="LSX"):
         return self._loop.run_until_complete(
             self.get_one(super().performance(isin, exchange=exchange))
+        )
+
+    def price_for_order(self, isin, order_type="buy", exchange="LSX",
+                        size=None, mode=None):
+        return self._loop.run_until_complete(
+            self.get_one(super().price_for_order(
+                isin, order_type=order_type, exchange=exchange,
+                size=size, mode=mode))
+        )
+
+    def available_size(self, isin, exchange="LSX"):
+        return self._loop.run_until_complete(
+            self.get_one(super().available_size(isin, exchange=exchange))
         )
 
     def neon_search(self, query="", page=1, page_size=20, instrument_type="stock", jurisdiction="DE", ):
