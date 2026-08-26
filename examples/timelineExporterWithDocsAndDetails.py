@@ -21,7 +21,7 @@ import time
 import requests
 
 from trapi.api import TrBlockingApi
-from trapi.timeline import detail_documents
+from trapi.timeline import detail_documents, document_url
 
 from environment import *
 
@@ -65,25 +65,41 @@ def fetch_details(tr, items):
     return details
 
 
-def download_documents(details, directory):
-    """Saves every document of every detail, skipping what is already there."""
+def download_documents(tr, details, directory):
+    """Saves every document of every detail, skipping what is already there.
+
+    Trade Republic attaches documents in two ways. Some come as a ready to
+    use link to a storage host, others only as a path that has to be fetched
+    from the API with the cookies of the session.
+    """
     os.makedirs(directory, exist_ok=True)
     saved, failed = 0, 0
 
     for event_id, detail in details.items():
         for number, document in enumerate(detail_documents(detail), start=1):
+            url = document_url(document)
+            if not url:
+                continue
+
             name = "".join(c if c.isalnum() or c in "-_" else "_"
                            for c in document["title"])[:60]
             path = os.path.join(directory, f"{event_id}_{number}_{name}.pdf")
             if os.path.isfile(path):
                 continue
+
+            # Only the API gets to see the session. The ready made links
+            # point at a storage host, and the cookies have no business
+            # being sent there.
+            fetch = tr.session.get if url.startswith(tr.url) else requests.get
+
             try:
-                response = requests.get(document["url"], timeout=60)
+                response = fetch(url, timeout=60)
                 response.raise_for_status()
             except Exception as error:
                 print(f"  could not download {document['title']}: {error}")
                 failed += 1
                 continue
+
             with open(path, "wb") as f:
                 f.write(response.content)
             saved += 1
@@ -109,7 +125,7 @@ def main():
         json.dump(details, f, indent="\t")
 
     print("Documents")
-    saved, failed = download_documents(details, DOCUMENT_DIR)
+    saved, failed = download_documents(tr, details, DOCUMENT_DIR)
 
     tr.close()
 

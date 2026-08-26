@@ -34,9 +34,31 @@ keine Anmeldung und erzeugt `myTransactions.csv`.
 
 Eintraege, deren `eventType` der Konverter nicht kennt, werden am Ende
 aufgelistet statt stillschweigend weggelassen. Soll so eine Art in den Export,
-gehoert sie in `EVENT_TYPES` in `trapi/timeline.py`. Dort steht auch `LABELS`
-mit den Zeilenbeschriftungen, aus denen Stueckzahl, Kurs, Gebuehren und
-Steuern gelesen werden - die haengen an der Sprache, in der die API antwortet.
+gehoert sie in `EVENT_TYPES` in `trapi/timeline.py`.
+
+Einige Arten sind absichtlich draussen und stehen mit Begruendung in
+`NOT_EXPORTED` - etwa `TRADE_INVOICE`, die Abrechnung zu einem Handel, der
+bereits unter seinem eigenen Ereignis exportiert wird. Sie mitzunehmen wuerde
+denselben Vorgang doppelt zaehlen.
+
+`CARD_TRANSACTION` ist dagegen drin, als Entnahme: Kartenzahlungen bewegen
+Geld auf dem Verrechnungskonto. Wer nur Wertpapiergeschaefte exportieren will,
+nimmt den Eintrag aus `EVENT_TYPES` heraus.
+
+## Zu den Beschriftungen
+
+`LABELS` in `trapi/timeline.py` sagt, aus welchen Zeilen die Werte gelesen
+werden. Zwei Eigenheiten der API stecken darin:
+
+* Es gibt **keine getrennten Zeilen fuer Stueckzahl und Kurs**. Ein Handel
+  rendert beides in einer Zeile als `0.347123 × €26.55`.
+* Die Beschriftungen haengen an der Sprache, in der die API antwortet
+  (`locale`). Deutsche und englische Varianten sind hinterlegt; fuer eine
+  andere Sprache gehoeren die dortigen Bezeichner ergaenzt.
+
+Die Zahlen selbst brauchen keine Einstellung. Trade Republic mischt die
+Schreibweisen innerhalb **einer** Antwort - `€26.55` neben `9,99 €` - deshalb
+wird pro Wert entschieden, welches Zeichen das Dezimaltrennzeichen ist.
 
 ## timelineExporterWithDocsAndDetails.py
 Laedt Timeline und Details nach `myTimeline.json` und `myTimelineDetails.json`
