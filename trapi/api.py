@@ -171,15 +171,17 @@ class TRApi:
         :param interval: seconds between two checks
         """
         deadline = time.monotonic() + timeout
-        state = None
-        while time.monotonic() < deadline:
+        while True:
             state = self.login_state(process_id)
             if state.get("status") == "CONFIRMED" or self.logged_in:
                 return state
+            if time.monotonic() + interval >= deadline:
+                break
             time.sleep(interval)
 
         raise TRapiExcLoginPending(
-            f"login was not confirmed within {timeout}s, last state: {state}"
+            f"login was not confirmed within {timeout}s, "
+            f"last status: {state.get('status')!r}"
         )
 
     @property
@@ -1300,7 +1302,12 @@ class TrBlockingApi(TRApi):
         super().__init__(number, pin, locale, connect_version=connect_version)
 
     def close(self):
-        """Closes the websocket and the event loop this instance owns."""
+        """Closes the websocket, the HTTP session and the event loop."""
+        try:
+            self.session.close()
+        except Exception:
+            pass
+
         if self._loop.is_closed():
             return
 
