@@ -354,6 +354,13 @@ class TransactionTest(unittest.TestCase):
                               event_type)
             self.assertNotIn(event_type, EVENT_TYPES)
 
+    def test_an_entry_without_an_event_type(self):
+        # Real timelines contain them, and status is None there as well.
+        self.assertIsNone(transaction_of(event(eventType=None, status=None)))
+        without = dict(event())
+        del without["eventType"]
+        self.assertIsNone(transaction_of(without))
+
     def test_unknown_event_types_are_left_out(self):
         # Silently dropping them was how the old converter lost entries, so
         # callers get None and can report it.
