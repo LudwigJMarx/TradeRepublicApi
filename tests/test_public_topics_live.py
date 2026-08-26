@@ -66,6 +66,16 @@ class PublicTopicsTest(unittest.TestCase):
     def test_crypto_details(self):
         self.assertEqual(self.tr.crypto_details(CRYPTO)["isin"], CRYPTO)
 
+    def test_price_for_order(self):
+        # The only order related topic that answers without a session.
+        price = self.tr.price_for_order(ISIN, "buy")
+        self.assertIn("price", price)
+        self.assertIn("priceAsk", price)
+
+    def test_price_for_order_needs_a_direction(self):
+        with self.assertRaises(Exception):
+            self.tr.price_for_order(ISIN, "sideways")
+
 
 if __name__ == "__main__":
     unittest.main()
