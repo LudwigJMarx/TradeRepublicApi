@@ -28,10 +28,26 @@ class TRapiExcServerUnknownState(TRapiException):
 class TRApi:
     url = "https://api.traderepublic.com"
 
-    def __init__(self, number, pin, locale='en'):
+    # Protocol version sent with the websocket "connect" frame. Trade Republic
+    # rejects outdated versions with "failed <latest>". As of 2026-08 the
+    # server accepts 26 - 34; anything outside that range is refused.
+    connect_version = 31
+
+    # The server validates the client identification sent along with the
+    # handshake, so it has to look like one of the official frontends.
+    connect_payload = {
+        "platformId": "webtrading",
+        "platformVersion": "chrome - 94.0.4606",
+        "clientId": "app.traderepublic.com",
+        "clientVersion": "5582",
+    }
+
+    def __init__(self, number, pin, locale='en', connect_version=None):
         self.number = number
         self.pin = pin
         self.locale = locale
+        if connect_version is not None:
+            self.connect_version = connect_version
         self.signing_key = None
         self.ws = None
         self.sessionToken = None
@@ -119,15 +135,23 @@ class TRApi:
     async def sub(self, payload_key, callback, **kwargs):
         if self.ws is None:
             self.ws = await websockets.connect("wss://api.traderepublic.com")
-            msg = json.dumps({"locale": self.locale})
-            await self.ws.send(f"connect 21 {msg}")
+            msg = json.dumps(dict(self.connect_payload, locale=self.locale))
+            await self.ws.send(f"connect {self.connect_version} {msg}")
             response = await self.ws.recv()
 
             if not response == "connected":
-                raise TRapiException(f"Connection Error: {response}")  # ValueError(f"Connection Error: {response}")
+                # The server answers "failed <version>" when the protocol
+                # version is no longer supported.
+                raise TRapiException(
+                    f"Connection Error: {response} "
+                    f"(sent protocol version {self.connect_version})"
+                )
 
         payload = kwargs.get("payload", {"type": payload_key})
-        payload["token"] = self.sessionToken
+        # Only authenticated topics expect a token. Sending "token": null makes
+        # the server reject some public topics with a JSON_PARSE_ERROR.
+        if self.sessionToken is not None:
+            payload["token"] = self.sessionToken
 
         key = kwargs.get("key", payload_key)
         id = self.type_to_id(key)
@@ -191,14 +215,17 @@ class TRApi:
             key=f"addToWatchlist {id}"
         )
 
-    async def aggregate_history_light(self, isin, range="max", resolution=604800000, exchange="LSX", callback=print):
+    async def aggregate_history_light(self, isin, range="max", resolution=None, exchange="LSX", callback=print):
         """aggregateHistoryLight request
 
         No login required
 
         :param isin: the stock's isin
         :param range: the range to display ("1d", "5d", "1m", "3m", "1y", "max")
-        :param resolution: the resolution in milliseconds; the default is 7 days
+        :param resolution: the resolution in milliseconds. Defaults to None,
+            which lets the server pick a resolution matching the range. Note
+            that the server silently discards the subscription for most
+            explicit values, so the request never gets an answer.
         :param exchange: the exchange the instrument is traded at
         :param callback: callback function
         :return: stock history
@@ -209,12 +236,15 @@ class TRApi:
         if exchange not in self.exchange_list:
             raise TRapiException(f"exchange must be either one of {self.exchange_list}")
 
+        payload = {"type": "aggregateHistoryLight",
+                   "range": range,
+                   "id": f"{isin}.{exchange}"}
+        if resolution is not None:
+            payload["resolution"] = resolution
+
         return await self.sub(
             "aggregateHistoryLight",
-            payload={"type": "aggregateHistoryLight",
-                     "range": range,
-                     "id": f"{isin}.{exchange}",
-                     "resolution": resolution},
+            payload=payload,
             callback=callback,
             key=f"aggregateHistoryLight {isin} {exchange} {range}",
         )
@@ -279,9 +309,26 @@ class TRApi:
 
     # todo collection
 
+    @deprecated(reason="Removed by Trade Republic. Use function compact_portfolio_by_type")
     async def compact_portfolio(self, callback=print):
-        """compactPortfolio request"""
+        """compactPortfolio request
+
+        .. deprecated::
+            The server answers with BAD_SUBSCRIPTION_TYPE. Use
+            :meth:`compact_portfolio_by_type` instead.
+        """
         await self.sub("compactPortfolio", callback)
+
+    async def compact_portfolio_by_type(self, callback=print):
+        """compactPortfolioByType request
+
+        Login required!
+
+        Replaces the removed portfolio and compactPortfolio topics.
+
+        :return: the positions of the portfolio, grouped by instrument type
+        """
+        await self.sub("compactPortfolioByType", callback)
 
     # todo  confirmOrder
 
@@ -505,8 +552,14 @@ class TRApi:
 
     # todo  performance
 
+    @deprecated(reason="Removed by Trade Republic. Use function compact_portfolio_by_type")
     async def portfolio(self, callback=print):
-        """portfolio"""
+        """portfolio request
+
+        .. deprecated::
+            The server answers with BAD_SUBSCRIPTION_TYPE. Use
+            :meth:`compact_portfolio_by_type` instead.
+        """
         await self.sub("portfolio", callback)
 
     async def portfolio_aggregate_history(self, range="max", callback=print):
@@ -650,8 +703,15 @@ class TRApi:
             key=f"ticker {isin} {exchange}",
         )
 
+    @deprecated(reason="Removed by Trade Republic. Use timeline_transactions or timeline_activity_log")
     async def timeline(self, after=None, callback=print):
-        """timeline request"""
+        """timeline request
+
+        .. deprecated::
+            The server answers with BAD_SUBSCRIPTION_TYPE. The timeline was
+            split into :meth:`timeline_transactions` (everything that moves
+            money) and :meth:`timeline_activity_log` (everything else).
+        """
         return await self.sub(
             "timeline",
             payload={"type": "timeline", "after": after},
@@ -659,17 +719,61 @@ class TRApi:
             key=f"timeline {after}",
         )
 
+    async def timeline_transactions(self, after=None, callback=print):
+        """timelineTransactions request
+
+        Login required!
+
+        Returns the money-moving part of the former timeline: orders, savings
+        plan executions, dividends, deposits and payouts.
+
+        :param after: cursor of the previous page, None for the first page
+        :param callback: callback function
+        """
+        return await self.sub(
+            "timelineTransactions",
+            payload={"type": "timelineTransactions", "after": after},
+            callback=callback,
+            key=f"timelineTransactions {after}",
+        )
+
+    async def timeline_activity_log(self, after=None, callback=print):
+        """timelineActivityLog request
+
+        Login required!
+
+        Returns the non-transactional part of the former timeline, e.g.
+        account changes and notifications.
+
+        :param after: cursor of the previous page, None for the first page
+        :param callback: callback function
+        """
+        return await self.sub(
+            "timelineActivityLog",
+            payload={"type": "timelineActivityLog", "after": after},
+            callback=callback,
+            key=f"timelineActivityLog {after}",
+        )
+
     async def timeline_actions(self, callback=print):
         """timelineActions request"""
         return await self.sub("timelineActions", callback)
 
     async def timeline_detail(self, id, callback=print):
-        """timelineDetail request"""
+        """timelineDetailV2 request
+
+        Login required!
+
+        The timelineDetail topic was replaced by timelineDetailV2.
+
+        :param id: the id of a timeline entry
+        :param callback: callback function
+        """
         return await self.sub(
-            "timelineDetail",
-            payload={"type": "timelineDetail", "id": id},
+            "timelineDetailV2",
+            payload={"type": "timelineDetailV2", "id": id},
             callback=callback,
-            key=f"timelineDetail {id}",
+            key=f"timelineDetailV2 {id}",
         )
 
     #  todo tradingPerkConditionStatus
@@ -747,18 +851,17 @@ class TRApi:
         while True:
             data_a = await self.get_data()
 
-            data = str(data_a).split()
+            # Frames look like "<id> <state> <payload>". Splitting on every run
+            # of whitespace and re-joining with a single space used to corrupt
+            # payloads that contain consecutive spaces, so limit the split.
+            parts = str(data_a).split(" ", 2)
 
-            id, state = data[:2]
+            id, state = parts[:2]
 
-            # Initial response
-            if len(data[2:]) == 1:
-                data = data[2:][0]
-            else:
-                data = data[2:]
+            data = parts[2] if len(parts) > 2 else ""
 
             if state == "D":
-                data = self.decode_updates(id, data)
+                data = self.decode_updates(id, data.split())
             elif state == "A":
                 pass
             elif state == "C":
@@ -779,9 +882,6 @@ class TRApi:
                 print(sErr)
                 raise TRapiExcServerUnknownState(f"Error during server access\n\t{sErr}")
                 # continue
-
-            if isinstance(data, list):
-                data = " ".join(data)
 
             self.latest_response[id] = data
             obj = json.loads(data)
@@ -866,9 +966,9 @@ class TRApi:
 
 
 class TrBlockingApi(TRApi):
-    def __init__(self, number, pin, timeout=20.0, locale="en"):
+    def __init__(self, number, pin, timeout=20.0, locale="en", connect_version=None):
         self.timeout = timeout
-        super().__init__(number, pin, locale)
+        super().__init__(number, pin, locale, connect_version=connect_version)
 
     async def get_one(self, f):
         await f
@@ -884,7 +984,7 @@ class TrBlockingApi(TRApi):
 
     # -----------------------------------------------------------
 
-    def aggregate_history_light(self, isin, range="max", resolution=604800000, exchange="LSX"):
+    def aggregate_history_light(self, isin, range="max", resolution=None, exchange="LSX"):
         return asyncio.get_event_loop().run_until_complete(
             self.get_one(super().aggregate_history_light(isin, range=range, resolution=resolution, exchange=exchange))
         )
@@ -901,6 +1001,11 @@ class TrBlockingApi(TRApi):
 
     def cash(self):
         return asyncio.get_event_loop().run_until_complete(self.get_one(super().cash()))
+
+    def compact_portfolio_by_type(self):
+        return asyncio.get_event_loop().run_until_complete(
+            self.get_one(super().compact_portfolio_by_type())
+        )
 
     def instrument(self, id):
         return asyncio.get_event_loop().run_until_complete(
@@ -957,6 +1062,16 @@ class TrBlockingApi(TRApi):
     def timeline(self, after=None):
         return asyncio.get_event_loop().run_until_complete(
             self.get_one(super().timeline(after=after))
+        )
+
+    def timeline_transactions(self, after=None):
+        return asyncio.get_event_loop().run_until_complete(
+            self.get_one(super().timeline_transactions(after=after))
+        )
+
+    def timeline_activity_log(self, after=None):
+        return asyncio.get_event_loop().run_until_complete(
+            self.get_one(super().timeline_activity_log(after=after))
         )
 
     def timeline_detail(self, id):
