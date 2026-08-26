@@ -9,6 +9,7 @@ websocket connection. Run them with::
 import asyncio
 import base64
 import json
+import time
 import unittest
 from unittest import mock
 
@@ -19,6 +20,7 @@ from trapi.api import (
     TrBlockingApi,
     TRapiException,
     TRapiExcLoginPending,
+    TRapiExcSessionExpired,
 )
 
 # A single loop for the whole module: asyncio primitives created in TRApi
@@ -44,6 +46,9 @@ class FakeWebsocket:
         self.sent.append(msg)
 
     async def recv(self):
+        # A real connection hands control back to the loop here, and code
+        # running in the background depends on that.
+        await asyncio.sleep(0)
         if not self._handshake_done:
             self._handshake_done = True
             return self.handshake_response
@@ -250,6 +255,189 @@ class WebLoginTest(unittest.TestCase):
         self.assertFalse(self.tr.logged_in)
         self.tr.session.cookies.set("tr_session", "value")
         self.assertTrue(self.tr.logged_in)
+
+
+class SessionLifetimeTest(unittest.TestCase):
+    def logged_in_api(self):
+        tr = api()
+        tr.session = FakeSession()
+        tr.session.cookies.set("tr_session", "s")
+        return tr
+
+    def expire(self, tr):
+        """Pretends the session was refreshed a full lifetime ago."""
+        tr._session_refreshed_at = time.monotonic() - tr.session_lifetime
+
+    def test_no_session_means_no_time_left(self):
+        tr = api()
+        tr.session = FakeSession()
+        self.assertEqual(tr.session_expires_in, 0.0)
+
+    def test_refreshing_resets_the_clock(self):
+        tr = self.logged_in_api()
+        self.expire(tr)
+        self.assertEqual(tr.session_expires_in, 0.0)
+
+        tr.refresh_session()
+        self.assertGreater(tr.session_expires_in, tr.session_lifetime - 5)
+
+    def test_expired_session_raises_its_own_error(self):
+        # Callers have to tell "log in again" apart from a transport problem.
+        tr = self.logged_in_api()
+        tr.session.gets = [FakeResponse(401, None, "Unauthorized")]
+        with self.assertRaises(TRapiExcSessionExpired):
+            tr.refresh_session()
+
+    def test_no_refresh_while_there_is_time_left(self):
+        tr = self.logged_in_api()
+        tr._session_refreshed_at = time.monotonic()
+        self.assertIsNone(tr.refresh_session_if_needed(margin=60))
+        self.assertEqual(tr.session.get_calls, [])
+
+    def test_refresh_shortly_before_the_end(self):
+        tr = self.logged_in_api()
+        tr._session_refreshed_at = time.monotonic() - (tr.session_lifetime - 30)
+        self.assertIsNotNone(tr.refresh_session_if_needed(margin=60))
+        self.assertEqual(len(tr.session.get_calls), 1)
+
+    def test_nothing_to_refresh_without_a_login(self):
+        tr = api()
+        tr.session = FakeSession()
+        self.assertIsNone(tr.refresh_session_if_needed())
+        self.assertEqual(tr.session.get_calls, [])
+
+    def test_keepalive_refreshes_a_session_that_runs_out(self):
+        tr = self.logged_in_api()
+        self.expire(tr)
+        calls = []
+        tr.refresh_session = lambda: calls.append(1)
+
+        async def briefly():
+            task = asyncio.ensure_future(
+                tr.keep_session_alive(margin=60, interval=0.01))
+            await asyncio.sleep(0.1)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        run(briefly())
+        self.assertTrue(calls)
+
+    def test_keepalive_stops_when_the_session_is_gone(self):
+        tr = api()
+        tr.session = FakeSession()
+        calls = []
+        tr.refresh_session = lambda: calls.append(1)
+        run(asyncio.wait_for(tr.keep_session_alive(interval=0), timeout=1))
+        self.assertEqual(calls, [])
+
+
+class KeepaliveWiringTest(unittest.TestCase):
+    def dead_websocket(self):
+        ws = FakeWebsocket(frames=[])
+        ws._handshake_done = True
+        return ws
+
+    def test_start_launches_and_cleans_up_the_keepalive(self):
+        tr = api()
+        tr.session = FakeSession()
+        tr.session.cookies.set("tr_session", "s")
+        tr.ws = self.dead_websocket()
+
+        launched = []
+
+        async def fake_keepalive(*args, **kwargs):
+            launched.append(1)
+            await asyncio.sleep(3600)
+
+        tr.keep_session_alive = fake_keepalive
+
+        with self.assertRaises(Exception):
+            run(tr.start())
+
+        self.assertEqual(launched, [1])
+        self.assertIsNone(tr._keepalive_task)
+
+    def test_a_single_response_needs_no_keepalive(self):
+        tr = api()
+        tr.session = FakeSession()
+        tr.session.cookies.set("tr_session", "s")
+        tr.ws = self.dead_websocket()
+
+        launched = []
+
+        async def fake_keepalive(*args, **kwargs):
+            launched.append(1)
+            await asyncio.sleep(3600)
+
+        tr.keep_session_alive = fake_keepalive
+
+        with self.assertRaises(Exception):
+            run(tr.start(receive_one=True))
+
+        self.assertEqual(launched, [])
+        self.assertIsNone(tr._keepalive_task)
+
+    def test_keepalive_can_be_switched_off(self):
+        tr = api()
+        tr.session = FakeSession()
+        tr.session.cookies.set("tr_session", "s")
+        tr.ws = self.dead_websocket()
+
+        launched = []
+
+        async def fake_keepalive(*args, **kwargs):
+            launched.append(1)
+            await asyncio.sleep(3600)
+
+        tr.keep_session_alive = fake_keepalive
+
+        with self.assertRaises(Exception):
+            run(tr.start(keep_session=False))
+
+        self.assertEqual(launched, [])
+        self.assertIsNone(tr._keepalive_task)
+
+
+class BlockingSessionRefreshTest(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(asyncio.set_event_loop, LOOP)
+
+    def test_refreshes_before_a_request_when_due(self):
+        # No loop runs between two blocking calls, so nothing in the
+        # background can extend the session there.
+        tr = TrBlockingApi("+490000000000", "0000")
+        self.addCleanup(tr.close)
+        tr.session = FakeSession()
+        tr.session.cookies.set("tr_session", "s")
+        tr._session_refreshed_at = time.monotonic() - tr.session_lifetime
+
+        calls = []
+        tr.refresh_session = lambda: calls.append(1)
+
+        ws = FakeWebsocket(frames=['0 A {"amount": 1}'])
+        with connected(ws):
+            tr.cash()
+
+        self.assertEqual(calls, [1])
+
+    def test_can_be_switched_off(self):
+        tr = TrBlockingApi("+490000000000", "0000", keep_session=False)
+        self.addCleanup(tr.close)
+        tr.session = FakeSession()
+        tr.session.cookies.set("tr_session", "s")
+        tr._session_refreshed_at = time.monotonic() - tr.session_lifetime
+
+        calls = []
+        tr.refresh_session = lambda: calls.append(1)
+
+        ws = FakeWebsocket(frames=['0 A {"amount": 1}'])
+        with connected(ws):
+            tr.cash()
+
+        self.assertEqual(calls, [])
 
 
 class WebsocketAuthTest(unittest.TestCase):

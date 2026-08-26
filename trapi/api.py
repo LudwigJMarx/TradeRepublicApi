@@ -30,6 +30,11 @@ class TRapiExcLoginPending(TRapiException):
     pass
 
 
+class TRapiExcSessionExpired(TRapiException):
+    """The session is gone and cannot be extended, log in again."""
+    pass
+
+
 class TRApi:
     url = "https://api.traderepublic.com"
 
@@ -43,6 +48,11 @@ class TRApi:
     # version CLIENT_VERSION_OUTDATED.
     app_version = "2.2631.13"
     platform = "web-pro"
+
+    # Trade Republic drops the session after a few minutes without traffic.
+    # The exact value is not documented, so this stays on the careful side and
+    # can be adjusted per instance.
+    session_lifetime = 290
     user_agent = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
 
@@ -67,6 +77,8 @@ class TRApi:
         self.refreshToken = None
         # The web login keeps its state in cookies rather than in a token.
         self.session = requests.Session()
+        self._session_refreshed_at = None
+        self._keepalive_task = None
         self.mu = asyncio.Lock()
         self.started = False
 
@@ -214,20 +226,70 @@ class TRApi:
             raise TRapiException(
                 f"login finished without a session cookie, state: {state}"
             )
+
+        self._session_refreshed_at = time.monotonic()
         return state
 
     def refresh_session(self):
-        """Extends the session. It expires after a few minutes of silence."""
+        """Extends the session.
+
+        :raises TRapiExcSessionExpired: when the server no longer knows the
+            session, which means a new login is needed
+        """
         r = self.session.get(
             f"{self.url}/api/v1/auth/web/session",
             headers=self.web_headers(),
             timeout=30,
         )
+        if r.status_code in (401, 403):
+            raise TRapiExcSessionExpired(
+                f"the session expired: HTTP {r.status_code} {r.text}"
+            )
         if r.status_code != 200:
             raise TRapiException(
                 f"could not refresh the session: HTTP {r.status_code} {r.text}"
             )
+
+        self._session_refreshed_at = time.monotonic()
         return r
+
+    @property
+    def session_expires_in(self):
+        """Seconds the session is still expected to last, 0 without one."""
+        if not self.logged_in or self._session_refreshed_at is None:
+            return 0.0
+        spent = time.monotonic() - self._session_refreshed_at
+        return max(0.0, self.session_lifetime - spent)
+
+    def refresh_session_if_needed(self, margin=60):
+        """Extends the session when it is about to expire.
+
+        :param margin: refresh once less than this many seconds are left
+        :return: the response of the refresh, or None when none was needed
+        """
+        if not self.logged_in:
+            return None
+        if self.session_expires_in > margin:
+            return None
+        return self.refresh_session()
+
+    async def keep_session_alive(self, margin=60, interval=30):
+        """Extends the session in the background for as long as it runs.
+
+        Started automatically by :meth:`start`. The request itself is
+        blocking, so it runs in a worker thread rather than on the loop.
+
+        :param margin: refresh once less than this many seconds are left
+        :param interval: seconds between two checks
+        """
+        loop = asyncio.get_event_loop()
+        while True:
+            await asyncio.sleep(interval)
+            if not self.logged_in:
+                return
+            if self.session_expires_in > margin:
+                continue
+            await loop.run_in_executor(None, self.refresh_session)
 
     def cookie_header(self):
         """The cookies of the session as one header value."""
@@ -1166,13 +1228,42 @@ class TRApi:
 
     # -----------------------------------------------------------
 
-    async def start(self, receive_one=False):
+    async def start(self, receive_one=False, keep_session=True):
+        """Reads from the websocket and hands each message to its callback.
+
+        :param receive_one: return after the first message instead of looping
+        :param keep_session: extend the session in the background while this
+            runs. Without it a long running client goes silent once Trade
+            Republic drops the session.
+        """
         async with self.mu:
             if self.started:
                 raise TRapiException("TrApi has already been started")
 
             self.started = True
 
+        if keep_session and not receive_one and self.logged_in \
+                and self._keepalive_task is None:
+            self._keepalive_task = asyncio.ensure_future(self.keep_session_alive())
+
+        try:
+            return await self._read_loop(receive_one)
+        finally:
+            await self.stop_keeping_session_alive()
+
+    async def stop_keeping_session_alive(self):
+        """Ends the background refresh started by :meth:`start`."""
+        task = self._keepalive_task
+        self._keepalive_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _read_loop(self, receive_one=False):
         while True:
             data_a = await self.get_data()
 
@@ -1291,8 +1382,17 @@ class TRApi:
 
 
 class TrBlockingApi(TRApi):
-    def __init__(self, number, pin, timeout=20.0, locale="en", connect_version=None):
+    def __init__(self, number, pin, timeout=20.0, locale="en", connect_version=None,
+                 keep_session=True, session_margin=60):
+        """
+        :param keep_session: extend the session before a request when it is
+            about to expire. Turn it off to control the refresh yourself.
+        :param session_margin: refresh once less than this many seconds are
+            left of the session
+        """
         self.timeout = timeout
+        self.keep_session = keep_session
+        self.session_margin = session_margin
         # A dedicated loop instead of asyncio.get_event_loop(): the latter is
         # deprecated since Python 3.10 and stops creating a loop implicitly in
         # 3.14. It is installed as the current loop so that the primitives
@@ -1338,16 +1438,18 @@ class TrBlockingApi(TRApi):
         return False
 
     async def get_one(self, f):
+        # There is no loop running between two blocking calls, so the session
+        # is extended here instead of by a background task.
+        if self.keep_session:
+            self.refresh_session_if_needed(margin=self.session_margin)
+
         await f
-        res = None
         try:
-            res = await asyncio.wait_for(
+            return await asyncio.wait_for(
                 super().start(receive_one=True), timeout=self.timeout
             )
-            return res
         except Exception as e:
             raise e
-            # return None
 
     # -----------------------------------------------------------
 

@@ -52,9 +52,36 @@ tr.await_login_confirmation(data["processId"])       # waits for the app
 tr.verify_login(data["processId"], "123456")         # confirms with a code
 ```
 
-The session expires after a few minutes of silence, `refresh_session()`
-extends it. Unlike the old device login, the web session does **not** log you
-out of the app - both can be active at the same time.
+Unlike the old device login, the web session does **not** log you out of the
+app - both can be active at the same time.
+
+### Keeping the session alive
+
+Trade Republic drops the session after a few minutes without traffic. Both
+APIs take care of that on their own:
+
+- `TRApi.start()` extends the session in the background while it runs.
+- `TrBlockingApi` extends it before a request when little time is left,
+  because nothing runs in between two blocking calls.
+
+So the usual case needs no attention. To do it yourself:
+
+```python3
+tr = TrBlockingApi(NUMBER, PIN, keep_session=False)
+...
+tr.refresh_session()               # extend it now
+tr.refresh_session_if_needed()     # extend it if the end is near
+tr.session_expires_in              # seconds the session should still last
+```
+
+`TRApi.start(keep_session=False)` does the same for the async API. Once the
+session is gone for good, `refresh_session()` raises `TRapiExcSessionExpired`,
+which says a new login is needed rather than that something went wrong on the
+way.
+
+How long a session lasts is not documented. `TRApi.session_lifetime` holds the
+assumption the refresh is scheduled against and errs on the careful side;
+raise or lower it if you measure something else.
 
 The methods of the old flow (`device_login()`, `register_new_device()`,
 `do_request()`) are kept but deprecated.
