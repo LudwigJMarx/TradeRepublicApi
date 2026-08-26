@@ -1127,6 +1127,18 @@ class TRApi:
 
         Fractional sizes work: an order over 0.016666 shares was accepted.
 
+        **"succeeded" does not mean the order stands.** That order was
+        confirmed, appeared in :meth:`orders` as "active", and was gone ten
+        seconds later. The timeline recorded it as TRADING_ORDER_EXPIRED in
+        the activity log, not among the transactions, and the customer got a
+        notification about it.
+
+        It was a limit a third below the market, for a fractional size, and
+        Trade Republic had routed it to TIB rather than the LSX it was asked
+        for - a limit like that presumably cannot rest in that book. Whatever
+        the reason, an order has to be checked through :meth:`orders` after
+        it was placed rather than trusted for its answer.
+
         :param order_id: a fresh uuid identifying this attempt
         :param isin: the instrument's isin
         :param order_type: "buy" or "sell"
