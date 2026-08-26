@@ -428,10 +428,13 @@ class CreateOrderPayloadTest(unittest.TestCase):
             self.payload_of(limit="cheap")
         self.assertIn("limit", str(ctx.exception))
 
-    def test_expiry_carries_a_value_field(self):
-        # The order objects show it as {"type": ..., "value": ...}.
-        expiry = self.payload_of(expiry="gfd")["parameters"]["expiry"]
-        self.assertEqual(expiry, {"type": "gfd", "value": None})
+    def test_a_plain_expiry_carries_no_value(self):
+        # The order objects report {"type": ..., "value": ...}, but copying
+        # that into a request makes the server refuse it: sending
+        # "value": null fails validation.
+        for expiry in ("gfd", "gtc"):
+            self.assertEqual(self.payload_of(expiry=expiry)["parameters"]["expiry"],
+                             {"type": expiry})
 
     def test_a_dated_expiry_needs_its_date(self):
         # Without it a "gtd" order has no date to expire on, and the library
